@@ -1,0 +1,60 @@
+[project]
+name = "wastelens-backend"
+version = "0.1.0"
+description = "WasteLens waste-intelligence platform backend"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    "pydantic[email]>=2.10",
+    "pydantic-settings>=2.6",
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    "boto3>=1.35",
+    "anthropic>=0.40",
+    "httpx>=0.28",
+    "rapidfuzz>=3.10",
+    "PyJWT>=2.10",
+    "bcrypt>=4.2",
+    "python-multipart>=0.0.18",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pillow>=11.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# B008: `Depends(...)` in argument defaults is the idiomatic FastAPI pattern.
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = []
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=app --cov-report=term-missing"
