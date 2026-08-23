@@ -91,8 +91,9 @@ frontend/         # React app (station capture / review / analytics shells)
 
 - [x] **Phase 0 — Scaffold**: repo, Docker Compose, schema + migrations, auth/RBAC, health checks, CI
 - [x] **Phase 1 — Capture pipeline**: upload → queue → NVIDIA/Anthropic VisionProvider → detections (demo: `python backend/scripts/demo.py`)
-- [ ] **Phase 2 — Review console** + vocabulary/brand management
-- [ ] **Phase 3 — Aggregation job** + waste profiles + analytics dashboard
-- [ ] **Phase 4 — Exports** + audit hardening
+- [ ] **Phase 2 — Review console** + vocabulary/brand management (detections can be flagged `needs_review` but nothing yet writes `review_status`/`corrected_item_name` — no review action endpoint or UI exists)
+- [x] **Phase 3 — Aggregation job** + waste profiles + analytics dashboard (`/analytics/*`, `/profiles/*`, `Analytics.tsx`)
+- [ ] **Phase 4 — Exports** + audit hardening (PII encryption at rest)
 
-Assumptions and trade-offs are recorded in [DECISIONS.md](DECISIONS.md).
+Assumptions and trade-offs are recorded in [DECISIONS.md](DECISIONS.md). See
+[PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for a full architecture writeup.
