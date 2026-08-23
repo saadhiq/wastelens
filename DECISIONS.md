@@ -80,3 +80,98 @@ stub documents the Phase-2 self-hosted path.
 ## 11. Frontend dev-mode container
 The `frontend` compose service runs Vite dev server for local development. A
 production build stage (nginx) is deferred until there is something to deploy.
+
+## 12. `consent_profiling` defaults to FALSE — opt-in, never opt-out
+`Resident.consent_profiling` (Phase 1 domain extension) gates whether a
+household's data is allowed to feed profiling/analytics, as distinct from
+`consent_operational` (defaults TRUE — the basic collection service can't
+run without it). Profiling consent is a stricter bar:
+
+- New column default: FALSE. A resident is opted OUT of profiling until they
+  take an explicit action that flips it TRUE (`consent_captured_at` records
+  when).
+- The migration backfills all existing residents to FALSE, not TRUE — no
+  retroactive consent is manufactured for rows that predate this column.
+- Nothing may ever set this column TRUE as a side effect of something else
+  (a bulk update, a different consent flag, a data migration). If a future
+  feature reads this flag to decide whether a resident's data can be used
+  for profiling/aggregation, treat "unset/FALSE" as the safe default in
+  every code path, not just the schema default.
+
+This is stricter than `consent_operational` deliberately — the operational
+service needs *a* consent to function at all, but profiling is optional
+value-add the resident hasn't asked for by default.
+
+## 13. `Detection.brand_text` kept alongside `matched_brand_id`, not instead of it
+Decision #7 already established storing both raw `ocr_text` and the
+fuzzy-matched `matched_brand_id`. Phase 1 adds `brand_text` (and
+`product_name_text`/`pack_size_text`/`barcode_text`) as the vision model's
+own structured read of the packaging, separate from the generic `ocr_text`
+blob and separate from the fuzzy-match result:
+
+- `matched_brand_id` — the system's best guess at *which known Brand* this
+  is, nullable, only set when the fuzzy match clears the threshold.
+- `brand_text` — the raw string the model read, always kept, matched or not.
+
+An unmatched `brand_text` is not noise — it is the most commercially
+valuable signal in the system: a product this facility doesn't have a
+`Brand` row for yet. Whatever eventually turns unmatched `brand_text` values
+into new `Brand` catalog entries (analogous to how `UnmappedLabel` tracks
+unmatched vocabulary) should read this column, not discard it.
+
+## 14. `InferenceRun` is its own table, not columns on `Capture`
+A `Capture` can have multiple vision-model call attempts — the pipeline's
+existing single repair retry (decision #10a) is already two calls for one
+capture. `InferenceRun` makes that 1—N explicit instead of continuing to
+represent it as an implicit "first call, then a retry that overwrites
+nothing" flow with no row of its own:
+
+- One `InferenceRun` row per attempt (`attempt_no`), unique per
+  `(capture_id, attempt_no)`.
+- Failed attempts are kept, not discarded — a `FAILED_INVALID_JSON` or
+  `FAILED_PROVIDER_ERROR` row with its `raw_text`/`error_message` is
+  training/prompt-tuning signal, the same principle as decision #10a's "the
+  raw text is preserved... nothing is lost."
+- `Detection.inference_run_id` is nullable for now. Every detection written
+  by today's pipeline predates this table; backfilling it (and having the
+  pipeline start writing it going forward) is Phase 2 work, not Phase 1 —
+  Phase 1 is models only.
+
+Columns-on-Capture was rejected because it can only ever represent the
+*latest* attempt, silently losing every prior one — exactly the failure
+mode decision #10a already went out of its way to avoid for repair retries.
+
+## 15. `ResidentBankDetail` is encrypted now, not deferred like the rest of PII
+Decision #2 deferred column-level encryption for `Resident` PII
+(name/phone/address) to Phase 4, on the reasoning that role-gating + audit
+logging is "at minimum" compliant and deterministic encryption needs its own
+careful change to preserve the unique `phone` constraint. That reasoning
+does not extend to bank account data, so it does not get the same
+deferral:
+
+- `account_number_encrypted` is sized/typed to hold ciphertext, never
+  plaintext, from the moment this table exists — there is no
+  plaintext-now-encrypt-later migration path for this column, unlike the
+  original PII columns.
+- `account_last4` is the one deliberately-plaintext fragment, kept
+  specifically so staff can verify an account on a call without decrypting
+  anything.
+- The encryption *service* (pgcrypto vs. app-side AES, key management) is
+  still out of scope for Phase 1 — this phase is models only, and nothing
+  writes to this table yet. But the schema itself already commits to the
+  ciphertext shape, so that choice never has to be revisited under a
+  populated table the way decision #2 flagged for the original PII columns.
+- This table is excluded from every Pydantic response schema — not
+  role-gated-but-visible like `ResidentOut`, but never serialized at all.
+
+## 16. `Capture.inspection_station_id`, not a repurposed `station_id`
+The Phase 1 spec asked for `Capture.station_id` to become an FK — but
+`station_id` already exists as a free-text column (the string an uploading
+station sends today) and decision-making rule #0 for this extension is
+"keep all existing columns." Repurposing it would break that rule and any
+existing caller relying on it being a string.
+
+Resolved by adding a second, new column: `inspection_station_id`, a nullable
+FK to the new `InspectionStation` catalog. `station_id` is untouched. A
+capture can optionally point at a catalogued station via the new column
+without anything having to migrate off the free-text one.

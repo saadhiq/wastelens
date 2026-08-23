@@ -1,35 +1,70 @@
 """All ORM models. Importing this package registers every table on Base.metadata,
 which Alembic's env.py relies on for autogenerate support."""
 
-from app.models.accounts import Resident, StaffAccount
+from app.models.accounts import Resident, ResidentBankDetail, StaffAccount
 from app.models.audit import AuditLog
 from app.models.base import (
     AnalysisStatus,
+    BagCondition,
     BagStatus,
     BagType,
     Base,
+    BinType,
+    BuildingType,
+    DietProfile,
+    InferenceRunStatus,
+    ItemState,
+    LightingCondition,
+    PickupChannel,
+    PickupStatus,
+    PreferredLanguage,
+    PriceTier,
+    ResidentStatus,
     ReviewStatus,
     StaffRole,
 )
-from app.models.catalog import Brand, VocabularyItem
+from app.models.catalog import Brand, UnmappedLabel, VocabularyItem
+from app.models.operations import Bin, BinTransfer, Collector, InspectionStation, PickupRequest
 from app.models.profiles import UserWasteProfile
-from app.models.waste import Bag, Capture, CollectionSession, Detection
+from app.models.reference import CalendarDay
+from app.models.waste import Bag, Capture, CollectionSession, Detection, InferenceRun
 
 __all__ = [
     "AnalysisStatus",
     "AuditLog",
     "Bag",
+    "BagCondition",
     "BagStatus",
     "BagType",
     "Base",
+    "Bin",
+    "BinTransfer",
+    "BinType",
     "Brand",
+    "BuildingType",
+    "CalendarDay",
     "Capture",
+    "Collector",
     "CollectionSession",
     "Detection",
+    "DietProfile",
+    "InferenceRun",
+    "InferenceRunStatus",
+    "InspectionStation",
+    "ItemState",
+    "LightingCondition",
+    "PickupChannel",
+    "PickupRequest",
+    "PickupStatus",
+    "PreferredLanguage",
+    "PriceTier",
     "Resident",
+    "ResidentBankDetail",
+    "ResidentStatus",
     "ReviewStatus",
     "StaffAccount",
     "StaffRole",
+    "UnmappedLabel",
     "UserWasteProfile",
     "VocabularyItem",
 ]

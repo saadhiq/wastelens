@@ -7,6 +7,7 @@ pipeline writes one Detection row per item found on the tray.
 
 import datetime as dt
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -16,14 +17,27 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
+    Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.models.base import AnalysisStatus, BagStatus, BagType, Base, ReviewStatus
+from app.models.base import (
+    AnalysisStatus,
+    BagCondition,
+    BagStatus,
+    BagType,
+    Base,
+    InferenceRunStatus,
+    ItemState,
+    LightingCondition,
+    ReviewStatus,
+)
 
 
 class Bag(Base):
@@ -42,11 +56,29 @@ class Bag(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # --- Phase 1 domain extension: physical weight + condition at handoff ---
+    gross_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    tare_weight_kg: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
+    bag_condition: Mapped[BagCondition | None] = mapped_column(
+        Enum(BagCondition, name="bag_condition"), nullable=True
+    )
+    assigned_bin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("bins.id", ondelete="SET NULL"), nullable=True
+    )
+
+    @property
+    def net_weight_kg(self) -> Decimal | None:
+        """Computed, not stored — None until both weights are recorded."""
+        if self.gross_weight_kg is None or self.tare_weight_kg is None:
+            return None
+        return self.gross_weight_kg - self.tare_weight_kg
+
 
 class CollectionSession(Base):
     """One household collection event; groups the (up to 4) bag captures."""
 
     __tablename__ = "collection_sessions"
+    __table_args__ = (Index("ix_collection_sessions_user_collected", "user_id", "collected_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -56,13 +88,38 @@ class CollectionSession(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # --- Phase 1 domain extension: who collected it, on what route, from where ---
+    collector_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collectors.id", ondelete="SET NULL"), nullable=True
+    )
+    vehicle_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    route_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    gps_latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
+    gps_longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6), nullable=True)
+    warehouse_arrival_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     captures: Mapped[list["Capture"]] = relationship(back_populates="session")
 
 
 class Capture(Base):
-    """One tray photo of one emptied bag at a capture station."""
+    """One tray photo of one emptied bag at a capture station.
+
+    `station_id` (free-text, set by whatever the uploading station sends)
+    predates the richer `InspectionStation` catalog added in Phase 1 — kept
+    as-is per the "keep all existing columns" rule. The new
+    `inspection_station_id` FK is a separate, optional way to point at a
+    catalogued station without disturbing that existing column or its
+    callers. See DECISIONS.md.
+    """
 
     __tablename__ = "captures"
+    __table_args__ = (
+        UniqueConstraint("bag_id", "image_sha256", name="uq_captures_bag_image_sha256"),
+        Index("ix_captures_bag_captured", "bag_id", "captured_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id: Mapped[uuid.UUID] = mapped_column(
@@ -84,8 +141,24 @@ class Capture(Base):
     # Idempotency key supplied by the station so flaky uploads can retry safely.
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
 
+    # --- Phase 1 domain extension: image provenance + capture conditions ---
+    inspection_station_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inspection_stations.id", ondelete="SET NULL"), nullable=True
+    )
+    tray_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Paired with the (bag_id, image_sha256) unique constraint above to block
+    # duplicate uploads of the same photo for the same bag.
+    image_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    image_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lighting_condition: Mapped[LightingCondition | None] = mapped_column(
+        Enum(LightingCondition, name="lighting_condition"), nullable=True
+    )
+
     session: Mapped[CollectionSession] = relationship(back_populates="captures")
     detections: Mapped[list["Detection"]] = relationship(back_populates="capture")
+    inference_runs: Mapped[list["InferenceRun"]] = relationship(back_populates="capture")
 
 
 class Detection(Base):
@@ -124,4 +197,78 @@ class Detection(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # --- Phase 1 domain extension: raw OCR fragments, item condition, geometry ---
+    # brand_text is the raw string the model read; matched_brand_id above is
+    # the fuzzy-matched result. We keep BOTH — an unmatched brand_text is the
+    # most commercially valuable signal in the system: a product we don't
+    # know about yet. See DECISIONS.md.
+    brand_text: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    product_name_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pack_size_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    barcode_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    item_state: Mapped[ItemState | None] = mapped_column(
+        Enum(ItemState, name="item_state"), nullable=True, index=True
+    )
+    is_contaminant: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    estimated_weight_g: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    count_est: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox_x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox_y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox_w: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bbox_h: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Nullable for now — every detection to date predates InferenceRun;
+    # backfilled in Phase 2 once the pipeline starts writing it.
+    inference_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("inference_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
     capture: Mapped[Capture] = relationship(back_populates="detections")
+
+
+class InferenceRun(Base):
+    """One vision-model call attempt for a Capture. The existing pipeline's
+    single repair retry (DECISIONS.md #10a) becomes attempt_no=2 here — both
+    attempts are kept, including failed ones, since a failed attempt is
+    training/prompt-tuning signal, not noise to discard. See DECISIONS.md
+    for why this is its own table rather than columns on Capture.
+
+    Detection.inference_run_id (nullable for now, backfilled in Phase 2) will
+    eventually point every detection back to the specific attempt that
+    produced it.
+    """
+
+    __tablename__ = "inference_runs"
+    __table_args__ = (
+        UniqueConstraint("capture_id", "attempt_no", name="uq_inference_run_capture_attempt"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    capture_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("captures.id", ondelete="CASCADE"), index=True
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer)
+    provider_name: Mapped[str] = mapped_column(String(50))
+    model_name: Mapped[str] = mapped_column(String(200), index=True)
+    model_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    status: Mapped[InferenceRunStatus] = mapped_column(
+        Enum(InferenceRunStatus, name="inference_run_status"), index=True
+    )
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    overall_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_predicted_bag_type: Mapped[BagType | None] = mapped_column(
+        Enum(BagType, name="bag_type", create_type=False), nullable=True
+    )
+    raw_response: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # For output that failed to parse at all — raw_response stays empty and
+    # the unparseable text lands here instead, same spirit as
+    # Detection.raw_model_output today.
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    capture: Mapped[Capture] = relationship(back_populates="inference_runs")
