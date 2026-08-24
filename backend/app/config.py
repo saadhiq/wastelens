@@ -23,6 +23,12 @@ class Settings(BaseSettings):
 
     # Object storage
     s3_endpoint_url: str = "http://localhost:9000"
+    # Host used when signing URLs handed to the browser (Phase 3 review page).
+    # In Docker, s3_endpoint_url is the container-network hostname ("minio"),
+    # which a browser on the host can't resolve — this is the address it can
+    # actually reach. Defaults to s3_endpoint_url for non-Docker setups where
+    # the two coincide.
+    s3_public_endpoint_url: str | None = None
     s3_access_key: str = "wastelens"
     s3_secret_key: str = "change-me"
     s3_bucket_captures: str = "tray-captures"
@@ -50,6 +56,12 @@ class Settings(BaseSettings):
     confidence_review_threshold: float = 0.75
     brand_match_threshold: int = 85
     cv_daily_call_cap: int = 1000
+
+    # Review workflow (Phase 3)
+    # % of high-confidence (>= confidence_review_threshold) detections that
+    # still land in the review queue as a random QA sample, on top of the
+    # detections that need review for other reasons.
+    review_qa_sample_percent: int = 5
 
 
 @lru_cache

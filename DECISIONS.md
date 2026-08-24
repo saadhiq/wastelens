@@ -175,3 +175,22 @@ Resolved by adding a second, new column: `inspection_station_id`, a nullable
 FK to the new `InspectionStation` catalog. `station_id` is untouched. A
 capture can optionally point at a catalogued station via the new column
 without anything having to migrate off the free-text one.
+
+## 17. Presigned S3 URLs are signed against a separate `s3_public_endpoint_url`
+Phase 3's review page is the first place a tray image URL is ever handed to
+the browser (`Capture.image_url` was previously an internal S3 key only the
+worker read). `storage.presigned_get_url()` initially reused the same
+`s3_endpoint_url` as every other storage call — but in the Docker Compose
+setup that value is `http://minio:9000`, the container-network hostname,
+which the browser (running on the host, outside that network) cannot
+resolve. Signed URLs built from it looked correct but never actually loaded.
+
+Caught by hitting the real running stack for Phase 3 verification (a plain
+`docker compose exec` pytest run wouldn't have caught it — the mismatch only
+shows up when something outside the Docker network tries to fetch the URL).
+
+Fixed by adding `s3_public_endpoint_url` (defaults to `s3_endpoint_url` when
+unset, so non-Docker/single-host setups need no change) and signing
+presigned URLs against it specifically, while every other `storage.py` call
+keeps using the internal `s3_endpoint_url`. Local Docker dev sets it to
+`http://localhost:9000` in `.env`/`.env.example`.

@@ -37,6 +37,7 @@ from app.models.base import (
     ItemState,
     LightingCondition,
     ReviewStatus,
+    ReviewVerdict,
 )
 
 
@@ -223,6 +224,7 @@ class Detection(Base):
     )
 
     capture: Mapped[Capture] = relationship(back_populates="detections")
+    human_reviews: Mapped[list["HumanReview"]] = relationship(back_populates="detection")
 
 
 class InferenceRun(Base):
@@ -272,3 +274,45 @@ class InferenceRun(Base):
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     capture: Mapped[Capture] = relationship(back_populates="inference_runs")
+
+
+class HumanReview(Base):
+    """One reviewer's decision on one Detection (Phase 3). Append-only audit
+    trail of review actions — a Detection can in principle be reviewed more
+    than once (e.g. a QA second pass), so this is 1—N from Detection, not
+    1—1; `Detection.review_status`/`corrected_item_name` always reflect the
+    *latest* HumanReview, kept in sync by services/review.py.apply_review().
+
+    The model's original output on Detection is never touched here either —
+    corrections live only in this table's corrected_* columns, same
+    principle as Detection's own docstring.
+    """
+
+    __tablename__ = "human_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    detection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("detections.id", ondelete="CASCADE"), index=True
+    )
+    # Every review has a definite reviewer at creation time (unlike
+    # Capture.operator_id, which is genuinely optional) — RESTRICT, not
+    # SET NULL, so a staff account with review history can't be deleted
+    # out from under this audit trail. In practice accounts are
+    # deactivated (is_active=False), not deleted, so this rarely bites.
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("staff_accounts.id", ondelete="RESTRICT"), index=True
+    )
+    reviewed_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    verdict: Mapped[ReviewVerdict] = mapped_column(
+        Enum(ReviewVerdict, name="review_verdict"), index=True
+    )
+    corrected_item_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    corrected_brand_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    corrected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    corrected_is_contaminant: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_spent_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    detection: Mapped[Detection] = relationship(back_populates="human_reviews")

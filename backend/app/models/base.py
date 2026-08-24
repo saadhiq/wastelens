@@ -138,3 +138,18 @@ class BinType(enum.StrEnum):
     PAPER = "PAPER"
     POLYTHENE = "POLYTHENE"
     GENERAL = "GENERAL"
+
+
+class ReviewVerdict(enum.StrEnum):
+    """A HumanReview's decision (Phase 3). Deliberately a separate enum from
+    ReviewStatus above, not a reuse of it, despite the overlapping words:
+    ReviewStatus is Detection's current, mutable state (and includes
+    `unreviewed`, which no HumanReview row ever represents — a HumanReview
+    only exists once a decision has been made); ReviewVerdict is the
+    immutable record of what a specific reviewer decided at a specific time.
+    UPPERCASE like Phase 1's other new-in-this-project enums, following that
+    same precedent (see base.py's Phase 1 section)."""
+
+    CONFIRMED = "CONFIRMED"
+    CORRECTED = "CORRECTED"
+    REJECTED = "REJECTED"

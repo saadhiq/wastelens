@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch, getToken, setToken } from "./lib/api";
 import Analytics from "./pages/Analytics";
 import Login from "./pages/Login";
+import Review from "./pages/Review";
 import Station from "./pages/Station";
 
 /** Routes: /login is public; everything else requires a JWT. */
@@ -13,7 +14,7 @@ export default function App() {
       <Route element={<AuthedLayout />}>
         <Route path="/" element={<Navigate to="/station" replace />} />
         <Route path="/station" element={<Station />} />
-        <Route path="/review" element={<Placeholder name="Review Console (Phase 2)" />} />
+        <Route path="/review" element={<Review />} />
         <Route path="/analytics" element={<Analytics />} />
       </Route>
     </Routes>
@@ -70,15 +71,6 @@ function AuthedLayout() {
         </div>
       </header>
       <Outlet />
-    </div>
-  );
-}
-
-function Placeholder({ name }: { name: string }) {
-  return (
-    <div className="p-8">
-      <h2 className="text-xl font-semibold">{name}</h2>
-      <p className="text-gray-500">Coming in a later phase.</p>
     </div>
   );
 }

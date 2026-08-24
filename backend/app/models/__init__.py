@@ -21,13 +21,21 @@ from app.models.base import (
     PriceTier,
     ResidentStatus,
     ReviewStatus,
+    ReviewVerdict,
     StaffRole,
 )
 from app.models.catalog import Brand, UnmappedLabel, VocabularyItem
 from app.models.operations import Bin, BinTransfer, Collector, InspectionStation, PickupRequest
 from app.models.profiles import UserWasteProfile
 from app.models.reference import CalendarDay
-from app.models.waste import Bag, Capture, CollectionSession, Detection, InferenceRun
+from app.models.waste import (
+    Bag,
+    Capture,
+    CollectionSession,
+    Detection,
+    HumanReview,
+    InferenceRun,
+)
 
 __all__ = [
     "AnalysisStatus",
@@ -48,6 +56,7 @@ __all__ = [
     "CollectionSession",
     "Detection",
     "DietProfile",
+    "HumanReview",
     "InferenceRun",
     "InferenceRunStatus",
     "InspectionStation",
@@ -62,6 +71,7 @@ __all__ = [
     "ResidentBankDetail",
     "ResidentStatus",
     "ReviewStatus",
+    "ReviewVerdict",
     "StaffAccount",
     "StaffRole",
     "UnmappedLabel",

@@ -157,8 +157,12 @@ def get_capture(
     account: StaffAccount = Depends(
         require_roles(StaffRole.station_operator, StaffRole.reviewer, StaffRole.analyst)
     ),
-) -> Capture:
+) -> CaptureDetail:
     capture = db.get(Capture, capture_id)
     if capture is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capture not found")
-    return capture
+    # capture.image_url is an S3 key; the response needs a URL the browser
+    # can actually load the image from (see storage.presigned_get_url).
+    out = CaptureDetail.model_validate(capture)
+    out.image_url = storage.presigned_get_url(capture.image_url)
+    return out

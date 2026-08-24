@@ -123,6 +123,42 @@ def analyst_account(db_engine):
     return {"email": email, "password": "analyst-pass-123", "id": str(account.id)}
 
 
+@pytest.fixture()
+def reviewer_account(db_engine):
+    TestSession = sessionmaker(bind=db_engine)
+    db = TestSession()
+    email = f"reviewer-{uuid.uuid4().hex[:8]}@wastelens-test.io"
+    account = StaffAccount(
+        email=email,
+        full_name="Test Reviewer",
+        hashed_password=hash_password("reviewer-pass-123"),
+        role=StaffRole.reviewer,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    db.close()
+    return {"email": email, "password": "reviewer-pass-123", "id": str(account.id)}
+
+
+@pytest.fixture()
+def station_operator_account(db_engine):
+    TestSession = sessionmaker(bind=db_engine)
+    db = TestSession()
+    email = f"station-{uuid.uuid4().hex[:8]}@wastelens-test.io"
+    account = StaffAccount(
+        email=email,
+        full_name="Test Station Operator",
+        hashed_password=hash_password("station-pass-123"),
+        role=StaffRole.station_operator,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    db.close()
+    return {"email": email, "password": "station-pass-123", "id": str(account.id)}
+
+
 def login(client: TestClient, email: str, password: str) -> dict[str, str]:
     resp = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text

@@ -81,6 +81,14 @@ export interface Detection {
   needs_review: boolean;
   review_status: string;
   corrected_item_name: string | null;
+  brand_text: string | null;
+  item_state: string | null;
+  is_contaminant: boolean;
+  count_est: number | null;
+  bbox_x: number | null;
+  bbox_y: number | null;
+  bbox_w: number | null;
+  bbox_h: number | null;
 }
 
 export interface Capture {
@@ -90,6 +98,82 @@ export interface Capture {
   captured_at: string;
   analysis_status: "pending" | "processing" | "done" | "failed";
   detections?: Detection[];
+  /** Only present on the detail endpoint — a time-limited presigned URL, not
+   * the raw S3 key. */
+  image_url?: string;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// --- Review workflow (Phase 3) -----------------------------------------
+
+export type ReviewVerdict = "CONFIRMED" | "CORRECTED" | "REJECTED";
+
+export interface ReviewQueueItem extends Detection {
+  capture_id: string;
+  capture_image_url: string;
+  capture_bag_type: string;
+  captured_at: string;
+  queue_reason: string;
+}
+
+export interface ReviewerStat {
+  reviewer_id: string;
+  reviewer_email: string;
+  reviewed_count: number;
+  confirmed_count: number;
+  corrected_count: number;
+  rejected_count: number;
+}
+
+export interface ReviewStats {
+  reviewed_today: number;
+  agreement_rate: number;
+  by_reviewer: ReviewerStat[];
+}
+
+export interface ReviewActionBody {
+  verdict: ReviewVerdict;
+  corrected_item_name?: string | null;
+  corrected_brand_text?: string | null;
+  corrected_count?: number | null;
+  corrected_is_contaminant?: boolean | null;
+  notes?: string | null;
+  time_spent_seconds?: number | null;
+}
+
+export interface BulkReviewResult {
+  reviewed: number;
+  skipped: string[];
+}
+
+export interface VocabularyItem {
+  id: string;
+  bag_type: string;
+  item_name: string;
+  display_name: string;
+  parent_category: string | null;
+  parent_id: string | null;
+  active: boolean;
+  is_contaminant_by_default: boolean;
+  is_sensitive: boolean;
+  created_at: string;
+}
+
+export interface UnmappedLabel {
+  id: string;
+  raw_label: string;
+  bag_type: string;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  suggested_vocabulary_item_id: string | null;
+  resolved: boolean;
 }
 
 // --- Calls ------------------------------------------------------------------
@@ -117,4 +201,45 @@ export function uploadCapture(image: File, bagTagId: string, stationId: string) 
 
 export function getCapture(id: string) {
   return apiFetch<Capture>(`/captures/${id}`);
+}
+
+// --- Review workflow ---------------------------------------------------
+
+export function getReviewQueue(limit = 20, offset = 0) {
+  return apiFetch<Page<ReviewQueueItem>>(`/review/queue?limit=${limit}&offset=${offset}`);
+}
+
+export function getReviewStats() {
+  return apiFetch<ReviewStats>("/review/stats");
+}
+
+export function reviewDetection(detectionId: string, body: ReviewActionBody) {
+  return apiFetch<Detection>(`/detections/${detectionId}/review`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function bulkReviewDetections(detectionIds: string[], verdict: ReviewVerdict = "CONFIRMED") {
+  return apiFetch<BulkReviewResult>("/detections/bulk-review", {
+    method: "POST",
+    body: JSON.stringify({ detection_ids: detectionIds, verdict }),
+  });
+}
+
+export function getVocabulary(bagType: string, activeOnly = true) {
+  return apiFetch<Page<VocabularyItem>>(
+    `/vocabulary?bag_type=${bagType}&active=${activeOnly}&limit=200`,
+  );
+}
+
+export function listUnmappedLabels(resolved = false) {
+  return apiFetch<Page<UnmappedLabel>>(`/vocabulary/unmapped?resolved=${resolved}&limit=100`);
+}
+
+export function promoteUnmappedLabel(id: string) {
+  return apiFetch<VocabularyItem>(`/vocabulary/from-unmapped/${id}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }
