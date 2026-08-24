@@ -207,3 +207,94 @@ class TestQualityByPromptVersion:
         assert row["reviewed"] >= 1
         assert row["confirmed"] >= 1
         assert row["accuracy"] == 1.0
+
+
+class TestConsumptionEndpoints:
+    def test_consumption_404_for_unknown_resident(self, client, admin_account):
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get(f"/api/v1/profiles/{uuid.uuid4()}/consumption", headers=headers)
+        assert resp.status_code == 404
+
+    def test_consumption_404_for_non_consenting_resident(self, client, admin_account, db):
+        resident = Resident(
+            name="No Consent",
+            phone=f"+9473{uuid.uuid4().hex[:7]}",
+            address="x",
+            consent_profiling=False,
+        )
+        db.add(resident)
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get(f"/api/v1/profiles/{resident.id}/consumption", headers=headers)
+        assert resp.status_code == 404
+
+    def test_consumption_shape_for_consenting_resident(self, client, admin_account, db):
+        resident = Resident(
+            name="Consents",
+            phone=f"+9474{uuid.uuid4().hex[:7]}",
+            address="x",
+            consent_profiling=True,
+        )
+        db.add(resident)
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get(f"/api/v1/profiles/{resident.id}/consumption", headers=headers)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["resident_id"] == str(resident.id)
+        assert body["category_signals"] == []
+        assert body["brand_signals"] == []
+        assert body["packaged_vs_fresh_ratio"] is None
+        assert body["spoiled_food_share"] is None
+
+    def test_predictions_empty_list_for_unknown_resident(self, client, admin_account):
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get(f"/api/v1/profiles/{uuid.uuid4()}/predictions", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_station_operator_cannot_read_consumption(self, client, admin_account, db):
+        resident = Resident(
+            name="RBAC Test",
+            phone=f"+9475{uuid.uuid4().hex[:7]}",
+            address="x",
+            consent_profiling=True,
+        )
+        db.add(resident)
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        create = client.post(
+            "/api/v1/auth/staff",
+            headers=headers,
+            json={
+                "email": f"op-consumption-{uuid.uuid4().hex[:6]}@wastelens-test.io",
+                "full_name": "Op",
+                "password": "op-pass-123",
+                "role": "station_operator",
+            },
+        )
+        assert create.status_code == 201, create.text
+        op_headers = login(client, create.json()["email"], "op-pass-123")
+        resp = client.get(f"/api/v1/profiles/{resident.id}/consumption", headers=op_headers)
+        assert resp.status_code == 403
+
+    def test_brand_switches_shape(self, client, admin_account):
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get("/api/v1/analytics/brand-switches?days=30", headers=headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_churn_risk_shape(self, client, admin_account):
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get("/api/v1/analytics/churn-risk", headers=headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_brand_switches_requires_analyst_role(self, client):
+        assert client.get("/api/v1/analytics/brand-switches").status_code == 401
+
+    def test_churn_risk_requires_analyst_role(self, client):
+        assert client.get("/api/v1/analytics/churn-risk").status_code == 401

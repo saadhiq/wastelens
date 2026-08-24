@@ -24,6 +24,13 @@ celery_app.conf.update(
             "task": "app.worker.rebuild_profiles",
             "schedule": 60 * 60 * 24,  # every 24h
         },
+        # Phase 6: independent of the rebuild above — both re-derive
+        # straight from Detection/Capture, neither reads the other's
+        # output, so there's no ordering dependency between them.
+        "compute-consumption-signals-nightly": {
+            "task": "app.worker.compute_consumption_signals",
+            "schedule": 60 * 60 * 24,  # every 24h
+        },
     },
 )
 
@@ -67,5 +74,19 @@ def rebuild_profiles_task(weeks_back: int = 2) -> int:
     db = SessionLocal()
     try:
         return rebuild_recent(db, weeks_back=weeks_back)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.worker.compute_consumption_signals")
+def compute_consumption_signals_task() -> int:
+    """Rebuild household consumption signals — replenishment cycles and
+    predicted next-disposal dates (Phase 6; scheduled nightly)."""
+    from app.db import SessionLocal
+    from app.services.profiling import compute_consumption_signals
+
+    db = SessionLocal()
+    try:
+        return compute_consumption_signals(db)
     finally:
         db.close()

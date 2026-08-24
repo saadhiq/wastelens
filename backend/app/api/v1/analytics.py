@@ -4,7 +4,7 @@ these endpoints expose user_id but never name/phone/address)."""
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,10 @@ from app.models import (
     UserWasteProfile,
 )
 from app.schemas.analytics import (
+    BrandSwitchEvent,
+    ChurnRiskItem,
+    ConsumptionOut,
+    ConsumptionSignalOut,
     ItemCount,
     ProfileOut,
     QualityByItem,
@@ -35,6 +39,12 @@ from app.schemas.analytics import (
 )
 from app.services.aggregation import rebuild_recent
 from app.services.audit import record
+from app.services.profiling import (
+    detect_brand_switches,
+    detect_churn_risk,
+    get_consumption,
+    get_predictions,
+)
 
 router = APIRouter(tags=["analytics"])
 
@@ -269,3 +279,70 @@ def unmapped_brands(
         )
         for r in rows
     ]
+
+
+# --- Phase 6: household consumption layer -----------------------------
+# Every read below goes through services/profiling.py, which enforces the
+# consent/sensitivity/rejection gate in one place — nothing here
+# re-implements or bypasses it.
+
+
+@router.get("/profiles/{resident_id}/consumption", response_model=ConsumptionOut)
+def consumption(
+    resident_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> ConsumptionOut:
+    """Replenishment cycles, brand loyalty, and packaged/fresh mix for one
+    household. 404 both when the resident doesn't exist and when they
+    don't currently consent to profiling — the two are indistinguishable
+    on purpose, so this endpoint never reveals consent status."""
+    result = get_consumption(db, resident_id)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return ConsumptionOut(
+        resident_id=result["resident_id"],
+        category_signals=[
+            ConsumptionSignalOut.model_validate(s) for s in result["category_signals"]
+        ],
+        brand_signals=[ConsumptionSignalOut.model_validate(s) for s in result["brand_signals"]],
+        brand_loyalty=result["brand_loyalty"],
+        packaged_vs_fresh_ratio=result["packaged_vs_fresh_ratio"],
+        spoiled_food_share=result["spoiled_food_share"],
+    )
+
+
+@router.get("/profiles/{resident_id}/predictions", response_model=list[ConsumptionSignalOut])
+def predictions(
+    resident_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> list[ConsumptionSignalOut]:
+    """Subjects due (or overdue) for replenishment, soonest-due first. []
+    for a nonexistent or non-consenting resident — matches GET
+    /profiles/{id}'s existing empty-list-not-404 behavior for "nothing to
+    show", since this endpoint's shape is a list, not a single object."""
+    signals = get_predictions(db, resident_id)
+    return [ConsumptionSignalOut.model_validate(s) for s in signals]
+
+
+@router.get("/analytics/brand-switches", response_model=list[BrandSwitchEvent])
+def brand_switches(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> list[BrandSwitchEvent]:
+    """Brand A stops, brand B starts, same household and category, within
+    the last `days`."""
+    return [BrandSwitchEvent(**event) for event in detect_brand_switches(db, days)]
+
+
+@router.get("/analytics/churn-risk", response_model=list[ChurnRiskItem])
+def churn_risk(
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> list[ChurnRiskItem]:
+    """Categories a household used to dispose of regularly that have gone
+    quiet for well beyond their own cycle — travel gaps (zero pickup
+    requests in the window) are suppressed, not reported as churn."""
+    return [ChurnRiskItem(**item) for item in detect_churn_risk(db)]

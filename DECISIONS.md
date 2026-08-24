@@ -366,3 +366,89 @@ test. Verified for real against the Docker image, where zbar does load.
 decode-success path meaningfully (a plain photo can only ever exercise the
 "nothing found" path). `qrcode` generates that image at test time; it has
 no runtime use and is not imported anywhere outside tests.
+
+## 29. `ConsumptionSignal.category` — a column the phase's literal field list didn't ask for
+Phase 6 asked for `ConsumptionSignal(resident, category or brand, computed_at)`
+plus the cycle fields — one dimension, not two. But `GET
+/analytics/brand-switches`'s own definition ("brand A stops and brand B
+starts in the SAME CATEGORY") can't be evaluated without knowing which
+category each BRAND-type signal belongs to, and a brand's disposals aren't
+confined to one bag_type by construction. Added a `category` column: for
+CATEGORY-type rows it always equals `subject_value` (redundant but keeps
+the column uniformly usable without branching on `subject_type` in every
+query); for BRAND-type rows it's the mode (most disposal-weighted) category
+among that brand's gated detections for the resident. This is the one
+place this phase's model diverges from its literal spec, and only because
+the model's own stated purpose (feeding brand-switch detection) requires it.
+
+## 30. Only `ConsumptionSignal` is persisted; brand loyalty, churn, and switches are computed at read time
+The phase names one new model. Brand share/Herfindahl, brand-switch
+events, category churn, and packaged/fresh + spoiled-food ratios are all
+described as things "the nightly job computes" but none has a column or
+table of its own in the spec. Rather than invent extra tables or cram
+unrelated shapes into `ConsumptionSignal`'s JSONB, these are computed at
+request time in `services/profiling.py`, straight from `ConsumptionSignal`
+rows (loyalty, switches, churn) or the same gated detection query
+(packaged/fresh, spoiled-food) — all cheap aggregates over a few hundred
+rows at this project's data volume, no different in spirit from the
+existing `analytics.py` endpoints (`top_items`, `quality_report`), none of
+which are pre-materialized either. Only the cycle/prediction facts in
+`ConsumptionSignal` get persisted nightly, because "predicted next
+disposal" is the one output meant to stay stable through the day and be
+served cheaply by `GET /profiles/{id}/predictions` — everything else is
+just as fast to compute fresh.
+
+## 31. Cycle confidence = `1 - stddev/mean`, clamped to [0, 1]
+The phase specifies the `confidence` field but not its formula. A tight,
+regular replenishment cycle (low stddev relative to its mean) should score
+near 1; an erratic one near 0. `1 - (stddev / mean)`, clamped, is the
+simplest measure with that shape and is null below
+`MIN_OBSERVATIONS_FOR_CYCLE` (3) — same threshold that gates the cycle
+mean/stddev/prediction themselves, per the phase's explicit "minimum 3
+observations... below that, confidence is null" instruction.
+
+## 32. `packaged_vs_fresh_ratio` is a share in [0, 1], not a literal ratio
+Named "ratio" in both the spec and the field name, but implemented as
+`packaged / (packaged + fresh)` rather than `packaged / fresh` — a
+resident with fresh-only or packaged-only disposals would otherwise
+produce `0.0` or an undefined/infinite ratio, neither of which is a
+sensible API value. The share form stays well-defined everywhere and is
+`None` only when there's genuinely neither to compare.
+
+## 33. Brand-switch detection is a query over persisted signals, not a fresh timeline walk
+`detect_brand_switches` reads `ConsumptionSignal` rows (already computed
+nightly) rather than re-walking raw detections chronologically per
+request. It reports every stopped-brand × started-brand pair within a
+(resident, category, window) — a real simplification when more than one
+brand starts or stops in the same category and window, since there's no
+reliable signal here (no purchase-linkage data) to pick a single causal
+1:1 pairing over reporting all plausible candidates. Verified live against
+a real (if seeded) old-brand/new-brand scenario — see the Phase 6 session
+verification.
+
+## 34. Churn's travel-gap suppression window is "since the category's last disposal", not a fixed lookback
+"A travel gap is not churn" — a resident whose relevant category signal
+looks churned is only actually reported if at least one `PickupRequest`
+exists with `requested_for_date >= last_disposal_date`, regardless of that
+request's status (even a cancelled or missed one proves the household was
+reachable, which is the only thing this check needs to know). Zero
+`PickupRequest` rows in that entire window means no chance to observe
+anything either way — the absence is uninformative, not evidence of
+churn, so it's suppressed rather than reported. Verified live: two
+residents with an identical 60-day-silent, previously-regular organic
+cycle — one with a `PickupRequest` in the window (flagged, correctly, as
+real churn) and one with none at all (correctly suppressed).
+
+## 35. `compute_consumption_signals` deletes stale rows, not just upserts live ones
+A naive nightly job would only ever add/update rows for subjects with
+current gated activity, silently leaving old `ConsumptionSignal` rows
+behind for a resident who revoked consent, or a subject that fell out of
+the gate (its vocabulary entry became sensitive, or every one of its
+detections got rejected/reviewed away). Both cases are handled explicitly:
+every row for a resident with `consent_profiling = False` is deleted
+outright at the start of each run; for a still-consenting resident, any
+previously tracked subject absent from this run's freshly computed key set
+is deleted too. Leaving stale predictive data behind for a resident who
+revoked consent would undermine the phase's own hard gate in spirit, even
+though the gate itself (the query filter) was technically still honored
+for the *next* computation.

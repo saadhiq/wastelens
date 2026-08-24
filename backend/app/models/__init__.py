@@ -11,6 +11,7 @@ from app.models.base import (
     Base,
     BinType,
     BuildingType,
+    ConsumptionSignalSubjectType,
     DietProfile,
     InferenceRunStatus,
     ItemState,
@@ -26,6 +27,7 @@ from app.models.base import (
     UnmappedLabelKind,
 )
 from app.models.catalog import Brand, UnmappedLabel, VocabularyItem
+from app.models.consumption import ConsumptionSignal
 from app.models.operations import Bin, BinTransfer, Collector, InspectionStation, PickupRequest
 from app.models.profiles import UserWasteProfile
 from app.models.reference import CalendarDay
@@ -55,6 +57,8 @@ __all__ = [
     "Capture",
     "Collector",
     "CollectionSession",
+    "ConsumptionSignal",
+    "ConsumptionSignalSubjectType",
     "Detection",
     "DietProfile",
     "HumanReview",

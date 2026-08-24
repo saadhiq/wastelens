@@ -172,3 +172,15 @@ class UnmappedLabelKind(enum.StrEnum):
 
     ITEM = "ITEM"
     BRAND = "BRAND"
+
+
+class ConsumptionSignalSubjectType(enum.StrEnum):
+    """What a ConsumptionSignal row tracks (Phase 6): a CATEGORY row's
+    subject_value is a waste category (Detection.category — today literally
+    the bag_type string); a BRAND row's subject_value is a Brand.name. Both
+    kinds share identical replenishment-cycle fields — a category and a
+    brand are both just "a recurring thing a resident disposes of", tracked
+    the same way, at two different levels of specificity."""
+
+    CATEGORY = "CATEGORY"
+    BRAND = "BRAND"
