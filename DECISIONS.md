@@ -569,3 +569,24 @@ station starve every other station's legitimate uploads. Defaults
 (`capture_upload_rate_limit=60`, `capture_upload_rate_window_seconds=60`)
 are generous for a real station's manual pace while still bounding a
 runaway script well below the daily CV call cap.
+
+## 42. `s3_endpoint_url` is genuinely optional — real AWS S3, not just MinIO
+`config.py`'s `s3_endpoint_url` was previously a required string defaulting
+to the MinIO endpoint, which meant boto3 was always pointed at a custom
+endpoint even when the intent was to talk to real AWS S3. It's now
+`str | None`; leaving it (and `s3_public_endpoint_url`) unset lets boto3
+resolve the correct regional AWS S3 endpoint on its own from `s3_region` —
+verified empirically that `endpoint_url=None` behaves identically to
+omitting the kwarg. `storage.py` needed no functional change, since every
+call already went through `_client()`/`boto3.client()` generically; only
+the docstring was expanded to state the dual-backend behavior explicitly.
+Also fixed `health.py`'s readiness probe, which called `s3.list_buckets()`
+— that needs account-wide `s3:ListAllMyBuckets`, a permission a real,
+least-privilege IAM policy scoped to one bucket should not grant. Changed
+to `s3.head_bucket(Bucket=settings.s3_bucket_captures)`, which needs only
+what the app itself already needs to function. Deliberately not adding an
+S3 Lifecycle rule for auto-expiring old images: that would delete objects
+without updating `Capture.image_purged_at`, silently desyncing the
+database from what's actually in the bucket — the existing
+`purge_old_images` job (#39) is the only deletion path and should stay
+that way.

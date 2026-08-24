@@ -1,4 +1,9 @@
-"""Object storage for tray images (S3-compatible; MinIO locally).
+"""Object storage for tray images — real AWS S3 in production, MinIO (an
+S3-compatible service) locally/in Docker. Nothing in this module is
+MinIO-specific: every call goes through boto3's S3 client, and which
+backend it talks to is entirely a matter of config.s3_endpoint_url —
+None (unset) resolves to real AWS S3 via boto3's own default endpoint
+resolution; any other value points at an S3-compatible service instead.
 
 Images are keyed as captures/{capture_id}.{ext}; the DB stores only the key
 (as image_url). Download happens in the worker when analysis runs.

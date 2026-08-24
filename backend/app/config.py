@@ -21,13 +21,18 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://wastelens:change-me@localhost:5432/wastelens"
     redis_url: str = "redis://localhost:6379/0"
 
-    # Object storage
-    s3_endpoint_url: str = "http://localhost:9000"
+    # Object storage. s3_endpoint_url is only for an S3-*compatible* service
+    # (MinIO locally/in Docker) — leave it unset (None) to talk to real AWS
+    # S3, which boto3 resolves to the correct regional endpoint on its own
+    # from s3_region. Setting it always overrides that resolution, so it
+    # must be None/absent, not just falsy-ish, for real S3.
+    s3_endpoint_url: str | None = "http://localhost:9000"
     # Host used when signing URLs handed to the browser (Phase 3 review page).
     # In Docker, s3_endpoint_url is the container-network hostname ("minio"),
     # which a browser on the host can't resolve — this is the address it can
     # actually reach. Defaults to s3_endpoint_url for non-Docker setups where
-    # the two coincide.
+    # the two coincide. Leave unset along with s3_endpoint_url for real S3 —
+    # AWS's presigned URLs are already publicly reachable as-is.
     s3_public_endpoint_url: str | None = None
     s3_access_key: str = "wastelens"
     s3_secret_key: str = "change-me"

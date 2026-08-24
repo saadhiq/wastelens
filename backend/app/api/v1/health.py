@@ -53,7 +53,12 @@ def readiness(response: Response) -> dict[str, Any]:
             # A probe must fail fast, never hang: 2s timeouts, no retries.
             config=BotoConfig(connect_timeout=2, read_timeout=2, retries={"max_attempts": 1}),
         )
-        s3.list_buckets()
+        # head_bucket on the one configured bucket, not list_buckets(): the
+        # latter needs account-wide s3:ListAllMyBuckets, which a real-AWS
+        # least-privilege IAM policy scoped to this one bucket deliberately
+        # doesn't grant — this probe should only ever need what the app
+        # itself needs.
+        s3.head_bucket(Bucket=settings.s3_bucket_captures)
         checks["object_storage"] = "ok"
     except Exception as exc:  # noqa: BLE001
         checks["object_storage"] = f"error: {type(exc).__name__}"
