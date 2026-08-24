@@ -643,3 +643,11 @@ match the `postgres:16` server image (would need the PGDG apt repo, not
 just Debian's default `postgresql-client` package) — this schema uses
 nothing version-specific, and matching versions exactly is a nicety, not
 a correctness requirement, for a plain relational dump like this one.
+`_pg_dump_dsn()` converts `DATABASE_URL` via SQLAlchemy's own URL parser
+(`make_url(...).set(drivername="postgresql").render_as_string(...)`)
+rather than a plain string replace — caught live: a generated
+`POSTGRES_PASSWORD` containing a `/` (openssl's base64 output can
+produce one) broke libpq's URI parser when spliced in unescaped
+(`pg_dump: error: invalid integer value ... for connection option
+"port"`, from libpq misreading the unescaped `/` as a path boundary).
+SQLAlchemy's renderer percent-encodes special characters correctly.

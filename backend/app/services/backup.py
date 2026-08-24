@@ -11,6 +11,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
+
 from app.config import get_settings
 from app.core.logging import get_logger
 from app.services import storage
@@ -21,8 +23,13 @@ BACKUP_PREFIX = "backups/postgres/"
 
 
 def _pg_dump_dsn(database_url: str) -> str:
-    """pg_dump doesn't understand the +psycopg SQLAlchemy dialect suffix."""
-    return database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    """pg_dump/libpq don't understand the +psycopg SQLAlchemy dialect
+    suffix, and a naive string swap isn't enough on its own — a generated
+    password containing "/" or other URI-special characters (openssl's
+    base64 output can include either) breaks libpq's own URI parser if
+    it's not percent-encoded, which a plain f-string/replace won't do.
+    SQLAlchemy's URL renderer already handles that encoding correctly."""
+    return make_url(database_url).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
 def run_backup(*, now: dt.datetime | None = None) -> str:
