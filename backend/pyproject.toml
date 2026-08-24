@@ -29,6 +29,11 @@ dependencies = [
     # of the vision model. Needs the libzbar0 shared library at runtime — see
     # Dockerfile; Windows wheels bundle it, so local dev needs nothing extra.
     "pyzbar>=0.1.9",
+    # Phase 7: column-level PII encryption (app/core/encryption.py).
+    "cryptography>=43.0",
+    # Phase 7: PDF report generation for analyst exports (services/exports.py).
+    # Pure Python, no system dependency (unlike e.g. WeasyPrint/Cairo).
+    "fpdf2>=2.8",
 ]
 
 [project.optional-dependencies]

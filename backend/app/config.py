@@ -63,6 +63,30 @@ class Settings(BaseSettings):
     # detections that need review for other reasons.
     review_qa_sample_percent: int = 5
 
+    # PII encryption (Phase 7 — closes DECISIONS.md #2)
+    # Fernet key (32 url-safe base64 bytes). The default below is a
+    # generated, non-secret dev key committed to source — fine for local
+    # Docker Compose, MUST be overridden (a real secret, out of source
+    # control) in any shared/production environment.
+    pii_encryption_key: str = "VHrhLtAQA6rrjMZQtJVg2YZfxLTqdWwDi6BM_8KG7Cw="
+    # Separate pepper for the phone blind index (HMAC-SHA256) — deliberately
+    # not the same key as encryption, so leaking one doesn't compromise both
+    # the ciphertext and the lookup index. Same dev-default caveat as above.
+    pii_blind_index_key: str = "change-me-blind-index-pepper"
+
+    # Image retention (Phase 7) — see DECISIONS.md for why 90 days.
+    image_retention_days: int = 90
+
+    # Rate limiting (Phase 7): capture uploads per station_operator account,
+    # fixed-window in Redis.
+    capture_upload_rate_limit: int = 60
+    capture_upload_rate_window_seconds: int = 60
+
+    # Alerting (Phase 7) — thresholds a scheduled check compares against;
+    # exceeding either writes an Alert row (see models/alerts.py).
+    alert_failed_run_rate_threshold: float = 0.25
+    alert_daily_spend_usd_threshold: float = 20.00
+
 
 @lru_cache
 def get_settings() -> Settings:

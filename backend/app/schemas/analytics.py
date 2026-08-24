@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.models.base import ConsumptionSignalSubjectType
+from app.models.base import AlertType, ConsumptionSignalSubjectType
 
 
 class ProfileOut(BaseModel):
@@ -141,3 +141,14 @@ class ChurnRiskItem(BaseModel):
     last_disposal_date: dt.date
     days_since_last_disposal: int
     expected_cycle_days: float
+
+
+class AlertOut(BaseModel):
+    id: uuid.UUID
+    alert_type: AlertType
+    message: str
+    metric_value: Decimal
+    threshold: Decimal
+    created_at: dt.datetime
+
+    model_config = {"from_attributes": True}

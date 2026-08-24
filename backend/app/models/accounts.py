@@ -13,6 +13,7 @@ from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Strin
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.encryption import EncryptedString, blind_index
 from app.models.base import (
     Base,
     BuildingType,
@@ -25,18 +26,48 @@ from app.models.base import (
 
 
 class Resident(Base):
-    """A registered household resident. `name` and `phone` are PII — reads are
-    role-gated and logged to audit_log (see app.api.deps.require_pii_access)."""
+    """A registered household resident. `name`, `phone`, and `address` are
+    PII — reads are role-gated and logged to audit_log (see
+    app.api.deps.require_pii_access), and the columns are encrypted at rest
+    (Phase 7, closing DECISIONS.md #2).
+
+    name/address use EncryptedString directly: nothing queries them by
+    value, so transparent, non-deterministic encryption is all they need.
+    phone is different — it has a uniqueness constraint and is looked up by
+    exact match (GET /users/by-phone/{phone}), neither of which works
+    against non-deterministic ciphertext. It's split into two columns:
+    `_phone_encrypted` (the actual retrievable value, non-deterministic) and
+    `phone_index` (a deterministic HMAC blind index — see
+    app/core/encryption.py). The `phone` property below makes that split
+    invisible to every existing caller: `resident.phone` still reads/writes
+    a plain string exactly as before Phase 7, and keeps `phone_index` in
+    sync automatically on write. The one thing that does NOT keep working
+    unchanged is filtering by phone in a SQL query — `Resident.phone` is a
+    plain Python property, not a column, so `.where(Resident.phone == x)`
+    would silently do the wrong thing (compare a property object, not build
+    SQL). Every such site must use `Resident.phone_index ==
+    blind_index(x)` instead — see api/v1/residents.py.
+    """
 
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(200))
-    phone: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    address: Mapped[str] = mapped_column(String(500))
+    name: Mapped[str] = mapped_column(EncryptedString)
+    _phone_encrypted: Mapped[str] = mapped_column("phone", EncryptedString)
+    phone_index: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    address: Mapped[str] = mapped_column(EncryptedString)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    @property
+    def phone(self) -> str:
+        return self._phone_encrypted
+
+    @phone.setter
+    def phone(self, value: str) -> None:
+        self._phone_encrypted = value
+        self.phone_index = blind_index(value)
 
     # --- Phase 1 domain extension: service operations + consent ---
     zone_code: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)

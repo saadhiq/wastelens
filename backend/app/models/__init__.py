@@ -2,8 +2,10 @@
 which Alembic's env.py relies on for autogenerate support."""
 
 from app.models.accounts import Resident, ResidentBankDetail, StaffAccount
+from app.models.alerts import Alert
 from app.models.audit import AuditLog
 from app.models.base import (
+    AlertType,
     AnalysisStatus,
     BagCondition,
     BagStatus,
@@ -41,6 +43,8 @@ from app.models.waste import (
 )
 
 __all__ = [
+    "Alert",
+    "AlertType",
     "AnalysisStatus",
     "AuditLog",
     "Bag",

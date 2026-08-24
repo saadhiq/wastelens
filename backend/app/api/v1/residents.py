@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import PII_ROLES, get_current_account, require_roles
+from app.core.encryption import blind_index
 from app.db import get_db
 from app.models import Resident, StaffAccount, StaffRole
 from app.schemas.common import Page
@@ -28,7 +29,7 @@ def create_resident(
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*PII_ROLES)),
 ) -> Resident:
-    existing = db.scalar(select(Resident).where(Resident.phone == body.phone))
+    existing = db.scalar(select(Resident).where(Resident.phone_index == blind_index(body.phone)))
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Phone already registered")
     resident = Resident(name=body.name, phone=body.phone, address=body.address)
@@ -74,7 +75,7 @@ def lookup_by_phone(
 ) -> Resident:
     """Phase 4: the collector's doorstep lookup. Same PII gating and audit
     trail as get_resident — a phone-number search surfaces the same PII."""
-    resident = db.scalar(select(Resident).where(Resident.phone == phone))
+    resident = db.scalar(select(Resident).where(Resident.phone_index == blind_index(phone)))
     if resident is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resident not found")
     record(
@@ -136,7 +137,9 @@ def update_resident(
     changes = body.model_dump(exclude_unset=True)
     if "phone" in changes:
         dup = db.scalar(
-            select(Resident).where(Resident.phone == changes["phone"], Resident.id != user_id)
+            select(Resident).where(
+                Resident.phone_index == blind_index(changes["phone"]), Resident.id != user_id
+            )
         )
         if dup is not None:
             raise HTTPException(

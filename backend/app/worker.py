@@ -31,6 +31,18 @@ celery_app.conf.update(
             "task": "app.worker.compute_consumption_signals",
             "schedule": 60 * 60 * 24,  # every 24h
         },
+        # Phase 7: image retention.
+        "purge-old-images-nightly": {
+            "task": "app.worker.purge_old_images",
+            "schedule": 60 * 60 * 24,  # every 24h
+        },
+        # Phase 7: alerting (failed-run rate, daily spend) — more frequent
+        # than the nightly jobs above, since an alert is only useful if it
+        # fires close to the problem it's flagging.
+        "check-alerts-hourly": {
+            "task": "app.worker.check_alerts",
+            "schedule": 60 * 60,  # every 1h
+        },
     },
 )
 
@@ -88,5 +100,34 @@ def compute_consumption_signals_task() -> int:
     db = SessionLocal()
     try:
         return compute_consumption_signals(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.worker.purge_old_images")
+def purge_old_images_task() -> int:
+    """Delete tray images past the retention window, keeping every derived
+    row (Phase 7; scheduled nightly)."""
+    from app.db import SessionLocal
+    from app.services.retention import purge_old_images
+
+    db = SessionLocal()
+    try:
+        return purge_old_images(db)
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.worker.check_alerts")
+def check_alerts_task() -> int:
+    """Check the failed-run rate and daily spend against their configured
+    thresholds, writing an Alert row for each breach (Phase 7; scheduled
+    hourly). Returns the number of new alerts written."""
+    from app.db import SessionLocal
+    from app.services.alerting import check_alerts
+
+    db = SessionLocal()
+    try:
+        return len(check_alerts(db))
     finally:
         db.close()

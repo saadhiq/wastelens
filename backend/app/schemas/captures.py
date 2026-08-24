@@ -169,6 +169,9 @@ class CaptureOut(BaseModel):
     image_width: int | None = None
     image_height: int | None = None
     file_size_bytes: int | None = None
+    # Phase 7: set once the retention job has deleted the S3 image — lets a
+    # client explain a null image_url rather than just showing a blank.
+    image_purged_at: dt.datetime | None = None
 
     model_config = {"from_attributes": True}
 

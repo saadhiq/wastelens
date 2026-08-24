@@ -58,6 +58,15 @@ def download_image(key: str) -> tuple[bytes, str]:
     return obj["Body"].read(), obj.get("ContentType", "image/jpeg")
 
 
+def delete_image(key: str) -> None:
+    """Used by the image retention job (Phase 7) — deletes the object but
+    never anything else about the capture; delete_object on a key that's
+    already gone is a no-op success in S3/MinIO, so this is safe to call
+    twice for the same key."""
+    settings = get_settings()
+    _client().delete_object(Bucket=settings.s3_bucket_captures, Key=key)
+
+
 def presigned_get_url(key: str, expires_in: int = 3600) -> str:
     """A time-limited URL the browser can load an image from directly,
     without proxying bytes through the API. Used by the review page (Phase 3)

@@ -171,6 +171,14 @@ class Capture(Base):
         Enum(LightingCondition, name="lighting_condition"), nullable=True
     )
 
+    # Phase 7: image retention. Null while the S3 object still exists; set
+    # to when the retention job deleted it. image_url (the S3 key) is left
+    # untouched even after purge — it's still meaningful provenance, just
+    # no longer fetchable. See services/retention.py.
+    image_purged_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     session: Mapped[CollectionSession] = relationship(back_populates="captures")
     detections: Mapped[list["Detection"]] = relationship(back_populates="capture")
     inference_runs: Mapped[list["InferenceRun"]] = relationship(back_populates="capture")

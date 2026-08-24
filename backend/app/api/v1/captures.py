@@ -9,13 +9,25 @@ import hashlib
 import io
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
+from app.config import get_settings
 from app.core.logging import get_logger
 from app.db import get_db
 from app.models import (
@@ -33,6 +45,8 @@ from app.schemas.captures import CaptureDetail, CaptureOut
 from app.schemas.common import Page
 from app.services import storage
 from app.services.audit import record
+from app.services.rate_limit import RateLimitExceeded, check_rate_limit
+from app.services.training_export import to_jsonl
 
 log = get_logger(__name__)
 
@@ -48,6 +62,24 @@ def enqueue_analysis(capture_id: uuid.UUID) -> None:
     analyze_capture_task.delay(str(capture_id))
 
 
+def _enforce_upload_rate_limit(
+    account: StaffAccount = Depends(require_roles(*_CAPTURE_ROLES)),
+) -> StaffAccount:
+    """Phase 7: fixed-window rate limit per station account, on top of the
+    existing role check — this dependency wraps require_roles rather than
+    running alongside it, so the auth check happens exactly once."""
+    settings = get_settings()
+    try:
+        check_rate_limit(
+            f"capture_upload:{account.id}",
+            limit=settings.capture_upload_rate_limit,
+            window_seconds=settings.capture_upload_rate_window_seconds,
+        )
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    return account
+
+
 @router.post("/captures", response_model=CaptureOut, status_code=status.HTTP_201_CREATED)
 def create_capture(
     image: UploadFile = File(...),
@@ -59,7 +91,7 @@ def create_capture(
     lighting_condition: LightingCondition | None = Form(None),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
-    account: StaffAccount = Depends(require_roles(*_CAPTURE_ROLES)),
+    account: StaffAccount = Depends(_enforce_upload_rate_limit),
 ) -> Capture:
     # Idempotent retry: same key → return the existing capture, no new job.
     if idempotency_key:
@@ -190,6 +222,25 @@ def list_captures(
     )
 
 
+@router.get("/captures/training-export")
+def training_export(
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(StaffRole.admin)),
+) -> Response:
+    """JSONL fine-tuning set for LocalYoloProvider (Phase 7): one line per
+    reviewed capture, holding its S3 image key and every human-verified
+    detection. Admin only — this is a bulk raw-data export, higher
+    sensitivity than the analyst-facing reports in api/v1/analytics.py.
+    Registered ahead of GET /captures/{capture_id} so "training-export"
+    doesn't get swallowed as a capture_id path parameter."""
+    body = to_jsonl(db)
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="training-export.jsonl"'},
+    )
+
+
 @router.get("/captures/{capture_id}", response_model=CaptureDetail)
 def get_capture(
     capture_id: uuid.UUID,
@@ -201,8 +252,15 @@ def get_capture(
     capture = db.get(Capture, capture_id)
     if capture is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Capture not found")
-    # capture.image_url is an S3 key; the response needs a URL the browser
-    # can actually load the image from (see storage.presigned_get_url).
     out = CaptureDetail.model_validate(capture)
-    out.image_url = storage.presigned_get_url(capture.image_url)
+    if capture.image_purged_at is not None:
+        # Phase 7 retention job already deleted the S3 object — signing a
+        # URL for it would just hand the browser a 404. None is honest;
+        # every derived row (detections, inference runs) is still intact.
+        out.image_url = None
+    else:
+        # capture.image_url is an S3 key; the response needs a URL the
+        # browser can actually load the image from (see
+        # storage.presigned_get_url).
+        out.image_url = storage.presigned_get_url(capture.image_url)
     return out

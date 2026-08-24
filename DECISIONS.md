@@ -452,3 +452,120 @@ is deleted too. Leaving stale predictive data behind for a resident who
 revoked consent would undermine the phase's own hard gate in spirit, even
 though the gate itself (the query filter) was technically still honored
 for the *next* computation.
+
+## 36. Resident PII encryption: a blind index for phone, transparent encryption for name/address
+Closes #2. `Resident.name`/`address` use `EncryptedString`, a SQLAlchemy
+`TypeDecorator` that encrypts (Fernet, non-deterministic — a different
+ciphertext every time, even for the same plaintext) and decrypts
+transparently at the ORM boundary. Nothing queries either column by value,
+so that's sufficient on its own.
+
+`phone` can't use the same approach unchanged: it has a uniqueness
+constraint and is looked up by exact match
+(`GET /users/by-phone/{phone}`), and non-deterministic ciphertext makes
+both impossible — `WHERE phone = encrypt(x)` never matches even the same
+phone number twice. Standard fix: a blind index. The column is split into
+`_phone_encrypted` (the real, non-deterministic ciphertext, mapped to the
+existing `phone` DB column so no data migration renames anything) and
+`phone_index` (`HMAC-SHA256(phone)`, deterministic, keyed by a *separate*
+pepper from the encryption key — so leaking one secret doesn't compromise
+both the stored values and the lookup index). A `phone` `@property`
+getter/setter keeps every existing caller (`resident.phone`,
+`Resident(phone=...)`, Pydantic's `from_attributes`) working unchanged —
+Python properties are transparent to instance-level access. What does
+**not** keep working: `Resident.phone` used in a SQL `.where()` clause —
+that's now a plain descriptor, not a column, so a query written against it
+would silently build the wrong thing rather than error. All three call
+sites (`api/v1/residents.py`: create, update, by-phone lookup) were found
+and rewritten against `Resident.phone_index == blind_index(x)` — grepped
+for exhaustively, and the full existing test suite (which exercises every
+one of them) stayed green with zero other changes needed, which is as
+much confidence as this migration gets that nothing was missed.
+
+Migration 0010 backfills every existing row (17 real residents in this
+project's dev DB at the time it ran) via `services/pii_backfill.py`, using
+raw SQL/Core rather than the `Resident` ORM model — by the time the
+migration runs, that model's column types already assume ciphertext, so
+reading pre-migration plaintext rows through it would try to Fernet-decrypt
+plaintext and raise. Verified live: full upgrade → downgrade → upgrade
+round-trip against the real dev DB, confirming both directions restore
+byte-identical plaintext.
+
+`ResidentBankDetail` (DECISIONS.md #15) and `qr_code` are untouched —
+neither is in #2's original scope (`name`/`phone`/`address`), and
+`ResidentBankDetail` still has no write path to even need encrypting yet.
+
+## 37. Export gating diverges from the pre-existing JSON endpoints on purpose
+Phase 7 asks that CSV/PDF exports respect the Phase 6 consent/is_sensitive
+gate. The plain JSON responses of `GET /profiles/{id}`, `GET
+/analytics/top-items`, `GET /analytics/top-brands`, and `GET
+/analytics/quality` predate that gate (top-items/top-brands/quality are
+Phase 3/5; profiles' JSON path reads `UserWasteProfile`, built by
+`services/aggregation.py`, which Phase 6 deliberately left ungated — see
+Phase 6 DECISIONS.md #30's reasoning, unchanged here). Retrofitting the
+gate onto those existing, already-shipped, already-tested response shapes
+was not asked for and risks silently changing behavior real code may
+already depend on. So the divergence is intentional and narrow: only the
+new `format=csv|pdf` code paths (`services/exports.py`, all built on
+`services/profiling.py`'s `gated_query`) apply the gate; the JSON default
+is byte-for-byte what it was before this phase. Documented with a test
+(`test_json_path_unchanged_for_non_consenting_resident`) specifically so
+this isn't mistaken for an oversight later.
+
+## 38. Training-data export is gated on `consent_operational`, not `consent_profiling`
+`GET /captures/training-export`'s JSONL feeds LocalYoloProvider fine-
+tuning — training the CV pipeline the system already runs on every bag, not
+the behavioral/consumer-insight analysis `consent_profiling` exists to gate
+(Phase 6, Resident's own field docstring: "opt-in, never opt-out" for
+*profiling* specifically). A resident who declined profiling but still
+uses the waste-collection service at all (the `consent_operational`
+default) has already consented to their tray being photographed and
+processed — training the same model that already processes it is that same
+operational bucket, not a new use of their data. `is_sensitive` items are
+still excluded regardless of which consent basis applies; the two consent
+flags gate different things for different reasons.
+
+## 39. Image retention window: 90 days
+`image_retention_days` defaults to 90. Rationale: every downstream feature
+that matters after a capture — review (Phase 3), brand/quality analytics
+(Phase 3/5), consumption signals and predictions (Phase 6), all analyst
+exports (Phase 7) — reads `Detection`/`InferenceRun`/`ConsumptionSignal`
+rows, never the raw image, once analysis has completed; the image itself
+is only ever needed again for a human to visually re-check a specific
+capture (an active review, an audit, a dispute). 90 days comfortably
+outlasts any realistic review backlog or dispute window while still
+bounding S3 storage growth on an indefinitely-running system — the
+alternative (keep images forever) turns storage cost into an unbounded
+function of total captures taken, with no real feature depending on it.
+Revisit if a future feature needs older images (e.g. periodic retraining
+against a longer image history) — the retention job only ever deletes the
+S3 object, `Capture.image_url` and every derived row survive regardless,
+so nothing about a purged capture's history is lost, only the ability to
+look at that specific photo again.
+
+## 40. Alerting has no external channel — a persisted, queryable Alert table instead
+No Slack/email/PagerDuty/webhook integration exists anywhere in this
+project; standing one up was never asked for and would mean inventing
+credentials, a delivery contract, and a failure mode for a channel nobody
+requested. "Alerting" here means: `services/alerting.py` checks the
+failed-InferenceRun rate and daily spend against configured thresholds
+(hourly, via Celery beat) and, on a breach, writes a row to a new `Alert`
+table (deduplicated — at most one new alert per type per hour, so a
+persisting breach doesn't spam) and logs a structured `log.warning`, the
+same observability pattern already used everywhere in this codebase.
+`GET /analytics/alerts` is the surface an operator actually checks. This
+is a real, working, testable implementation of the requirement as stated,
+scoped to what this project actually has — not a stub for a channel that
+was never built.
+
+## 41. Capture-upload rate limiting: fixed window, Redis, per station account
+`services/rate_limit.py` mirrors `cost_guard.py`'s existing pattern exactly
+(Redis `INCR` on a time-bucketed key, `EXPIRE` set once on first increment)
+rather than introducing a second rate-limiting approach into the codebase.
+Keyed per `StaffAccount.id`, not per IP or globally: the failure mode this
+guards against is one station's script misbehaving (a retry loop, a bug),
+not cross-station abuse, and a shared global limit would let one bad
+station starve every other station's legitimate uploads. Defaults
+(`capture_upload_rate_limit=60`, `capture_upload_rate_window_seconds=60`)
+are generous for a real station's manual pace while still bounding a
+runaway script well below the daily CV call cap.

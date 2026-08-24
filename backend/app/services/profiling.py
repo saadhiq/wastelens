@@ -3,10 +3,11 @@ predicted next-disposal dates, brand loyalty/switches, category churn, and
 packaged-vs-fresh ratios — all derived from the same gated detection
 history and the ConsumptionSignal rows the nightly job computes from it.
 
-HARD GATE, enforced in exactly one place — _gated_detections_query below.
-Every feature function in this module that touches raw detections builds
-its query on top of this one; none of them re-implement the filter. Every
-computation here excludes:
+HARD GATE, enforced in exactly one place — gated_query below (and
+_gated_detections_query, its common-case wrapper). Every feature function
+in this module, and services/exports.py's gated report queries, build on
+this one function; none of them re-implement the filter. Every computation
+here excludes:
   - residents where consent_profiling is False
   - detections whose VocabularyItem has is_sensitive = True
   - detections with review_status REJECTED
@@ -25,6 +26,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import Select, and_, delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -59,15 +61,24 @@ _PACKAGED_CATEGORIES = {BagType.polythene.value, BagType.paper.value}
 _SPOILED_STATES = {ItemState.SPOILED, ItemState.MOULDY}
 
 
-def _gated_detections_query() -> Select:
-    """THE hard gate. Joins detections to their capture/session/resident
-    and (via bag_type + effective item_name, since Detection has no FK to
-    VocabularyItem) to the vocabulary entry that says whether this item is
-    sensitive. Callers narrow with additional .where()/.join() clauses;
-    never build a competing filter."""
+def gated_query(*entities: Any) -> Select:
+    """THE hard gate, parametrized on which columns/entities to select —
+    every gated query in this codebase (this module's own feature
+    functions, and services/exports.py's gated CSV/PDF report queries)
+    builds on this one function, never a competing filter. Joins Detection
+    to its capture/session/resident and (via bag_type + effective item
+    name, since Detection has no FK to VocabularyItem) to the vocabulary
+    entry that says whether this item is sensitive.
+
+    Callers passing full entities (Detection, Capture, ...) get them
+    automatically; callers selecting derived columns (func.count(), a
+    label(), ...) must pass those directly — .select_from(Detection)
+    anchors the FROM clause either way, so grouping/aggregate queries work
+    the same as entity queries."""
     effective_name = func.coalesce(Detection.corrected_item_name, Detection.item_name)
     return (
-        select(Detection, Capture, CollectionSession.user_id.label("resident_id"))
+        select(*entities)
+        .select_from(Detection)
         .join(Capture, Detection.capture_id == Capture.id)
         .join(CollectionSession, Capture.session_id == CollectionSession.id)
         .join(Resident, CollectionSession.user_id == Resident.id)
@@ -84,6 +95,12 @@ def _gated_detections_query() -> Select:
             or_(VocabularyItem.is_sensitive.is_(False), VocabularyItem.id.is_(None)),
         )
     )
+
+
+def _gated_detections_query() -> Select:
+    """The common case: every gated detection, alongside its capture and
+    resident id."""
+    return gated_query(Detection, Capture, CollectionSession.user_id.label("resident_id"))
 
 
 def _resident_consents(db: Session, resident_id: uuid.UUID) -> bool:

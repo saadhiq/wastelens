@@ -184,3 +184,10 @@ class ConsumptionSignalSubjectType(enum.StrEnum):
 
     CATEGORY = "CATEGORY"
     BRAND = "BRAND"
+
+
+class AlertType(enum.StrEnum):
+    """What an Alert row (Phase 7) is flagging — see services/alerting.py."""
+
+    FAILED_RUN_RATE = "FAILED_RUN_RATE"
+    DAILY_SPEND = "DAILY_SPEND"

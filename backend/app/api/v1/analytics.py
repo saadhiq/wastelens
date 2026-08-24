@@ -4,13 +4,14 @@ these endpoints expose user_id but never name/phone/address)."""
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
 from app.db import get_db
 from app.models import (
+    Alert,
     AnalysisStatus,
     BagType,
     Brand,
@@ -25,6 +26,7 @@ from app.models import (
     UserWasteProfile,
 )
 from app.schemas.analytics import (
+    AlertOut,
     BrandSwitchEvent,
     ChurnRiskItem,
     ConsumptionOut,
@@ -39,6 +41,14 @@ from app.schemas.analytics import (
 )
 from app.services.aggregation import rebuild_recent
 from app.services.audit import record
+from app.services.exports import (
+    gated_profile_rows,
+    gated_quality_rows,
+    gated_top_brands,
+    gated_top_items,
+    to_csv,
+    to_pdf,
+)
 from app.services.profiling import (
     detect_brand_switches,
     detect_churn_risk,
@@ -55,21 +65,64 @@ def _since(days: int) -> dt.datetime:
     return dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
 
 
+def _export_response(
+    export_format: str, filename_stem: str, title: str, headers: list[str], rows: list
+) -> Response:
+    """CSV/PDF variant of a report (Phase 7) — the JSON default is
+    returned by the caller itself via the normal response_model path, this
+    is only reached for format=csv/pdf."""
+    if export_format == "csv":
+        content: bytes = to_csv(headers, rows)
+        media_type = "text/csv"
+    else:
+        content = to_pdf(title, headers, rows)
+        media_type = "application/pdf"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename_stem}.{export_format}"'},
+    )
+
+
 @router.get("/profiles/{user_id}", response_model=list[ProfileOut])
 def get_user_profiles(
     user_id: uuid.UUID,
     weeks: int = Query(12, ge=1, le=104),
+    export_format: str = Query("json", alias="format", pattern="^(json|csv|pdf)$"),
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
-) -> list[UserWasteProfile]:
-    """A household's weekly waste-profile timeline, newest first."""
-    return list(
-        db.scalars(
-            select(UserWasteProfile)
-            .where(UserWasteProfile.user_id == user_id)
-            .order_by(UserWasteProfile.week_start.desc())
-            .limit(weeks)
+) -> list[UserWasteProfile] | Response:
+    """A household's weekly waste-profile timeline, newest first.
+
+    format=csv/pdf (Phase 7) additionally gates on the household's current
+    consent — unlike the JSON path above, which is unchanged pre-Phase-6
+    behavior. See services/exports.py."""
+    if export_format == "json":
+        return list(
+            db.scalars(
+                select(UserWasteProfile)
+                .where(UserWasteProfile.user_id == user_id)
+                .order_by(UserWasteProfile.week_start.desc())
+                .limit(weeks)
+            )
         )
+
+    profiles = gated_profile_rows(db, user_id, weeks)
+    if profiles is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    headers = [
+        "week_start",
+        "veg_frequency",
+        "packaged_food_frequency",
+        "top_vegetables",
+        "top_brands",
+    ]
+    rows = [
+        [p.week_start, p.veg_frequency, p.packaged_food_frequency, p.top_vegetables, p.top_brands]
+        for p in profiles
+    ]
+    return _export_response(
+        export_format, f"profile-{user_id}", f"Waste profile — {user_id}", headers, rows
     )
 
 
@@ -92,10 +145,21 @@ def top_items(
     bag_type: BagType | None = Query(None),
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(10, ge=1, le=50),
+    export_format: str = Query("json", alias="format", pattern="^(json|csv|pdf)$"),
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
-) -> list[ItemCount]:
-    """Most frequent (trustworthy) items across all households."""
+) -> list[ItemCount] | Response:
+    """Most frequent (trustworthy) items across all households.
+
+    format=csv/pdf (Phase 7) additionally excludes non-consenting
+    residents and sensitive items — the JSON path above is unchanged
+    pre-Phase-6 behavior. See services/exports.py."""
+    if export_format != "json":
+        rows = gated_top_items(db, days, limit)
+        return _export_response(
+            export_format, "top-items", "Top items", ["item_name", "count"], list(rows)
+        )
+
     name = func.coalesce(Detection.corrected_item_name, Detection.item_name)
     query = (
         select(name.label("name"), func.count().label("count"))
@@ -118,10 +182,19 @@ def top_items(
 def top_brands(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(10, ge=1, le=50),
+    export_format: str = Query("json", alias="format", pattern="^(json|csv|pdf)$"),
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
-) -> list[ItemCount]:
-    """Most frequently matched brands from packaging OCR."""
+) -> list[ItemCount] | Response:
+    """Most frequently matched brands from packaging OCR.
+
+    format=csv/pdf (Phase 7): see top_items above."""
+    if export_format != "json":
+        rows = gated_top_brands(db, days, limit)
+        return _export_response(
+            export_format, "top-brands", "Top brands", ["brand", "count"], list(rows)
+        )
+
     query = (
         select(Brand.name, func.count().label("count"))
         .join(Detection, Detection.matched_brand_id == Brand.id)
@@ -140,11 +213,21 @@ def top_brands(
 @router.get("/analytics/quality", response_model=QualityReport)
 def quality_report(
     days: int = Query(30, ge=1, le=365),
+    export_format: str = Query("json", alias="format", pattern="^(json|csv|pdf)$"),
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
-) -> QualityReport:
+) -> QualityReport | Response:
     """Model-health metrics: where is the vision model weak? High correction
-    rates per item class point at what to fine-tune first."""
+    rates per item class point at what to fine-tune first.
+
+    format=csv/pdf (Phase 7): see top_items above — the export's rows are
+    gated even though this report is about model performance, not
+    household behavior, per the phase's explicit instruction."""
+    if export_format != "json":
+        rows = gated_quality_rows(db, days)
+        headers = ["item_name", "detections", "avg_confidence", "reviewed", "corrected"]
+        return _export_response(export_format, "quality-report", "Quality report", headers, rows)
+
     since = _since(days)
 
     totals = db.execute(
@@ -346,3 +429,16 @@ def churn_risk(
     quiet for well beyond their own cycle — travel gaps (zero pickup
     requests in the window) are suppressed, not reported as churn."""
     return [ChurnRiskItem(**item) for item in detect_churn_risk(db)]
+
+
+@router.get("/analytics/alerts", response_model=list[AlertOut])
+def list_alerts(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> list[Alert]:
+    """Failed-run-rate and daily-spend breaches (Phase 7), newest first —
+    written by the hourly check-alerts job (services/alerting.py). No
+    external notification channel exists in this project; this endpoint
+    is the alert surface itself."""
+    return list(db.scalars(select(Alert).order_by(Alert.created_at.desc()).limit(limit)))
