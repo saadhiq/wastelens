@@ -8,7 +8,12 @@ WORKDIR /app
 
 # libzbar0: shared library pyzbar needs at runtime (Phase 5 barcode decode) —
 # pip alone doesn't provide it, unlike Windows' bundled-DLL wheel.
-RUN apt-get update && apt-get install -y --no-install-recommends libzbar0 \
+# postgresql-client: provides pg_dump for the nightly backup job (Phase 8).
+# Debian's default package version trails the db service's postgres:16 image
+# by a major version or two; that's fine for pg_dump against a plain schema
+# like this one, but if the server image is ever bumped well past this,
+# revisit pinning an exact-matching client via the PGDG apt repo.
+RUN apt-get update && apt-get install -y --no-install-recommends libzbar0 postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./

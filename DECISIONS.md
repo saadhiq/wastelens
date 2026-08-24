@@ -620,3 +620,26 @@ endpoint settings are unset, this one function now builds
 boto3. Every other call in this module (`head_bucket`, `put_object`,
 `get_object`) resolves correctly on its own and is untouched — this is
 a `generate_presigned_url()`-specific quirk, not a general one.
+
+## 45. Nightly database backup: pg_dump to the same S3 bucket, own prefix
+`services/backup.py` shells out to `pg_dump` (now installed alongside
+`libzbar0` in the Dockerfile) against `DATABASE_URL`, gzips the plain-SQL
+output, and uploads it to `backups/postgres/` in `s3_bucket_captures` by
+default — a separate `s3_bucket_backups` setting exists for isolating it
+in its own bucket, but reusing the captures bucket needs zero additional
+AWS console work, since the existing IAM policy already covers the whole
+bucket, not just the `captures/` prefix. Runs nightly via Celery beat
+(`app.worker.backup_database`) and on demand via `POST
+/api/v1/admin/backups/run` (admin-only, audit-logged) — the first
+dedicated admin router in this codebase; every prior admin-gated
+endpoint lived inside its own domain router. Plain-SQL over `pg_dump`'s
+custom format: human-diffable, restorable with nothing but `psql`, and
+this database is nowhere near large enough for custom-format's
+parallel-restore benefit to matter. Backups older than
+`backup_retention_days` (default 30) are pruned after each run — not by
+a separate job, since a bucket that's never backed-up-to has nothing to
+prune anyway. Deliberately not pinning `pg_dump`'s version to exactly
+match the `postgres:16` server image (would need the PGDG apt repo, not
+just Debian's default `postgresql-client` package) — this schema uses
+nothing version-specific, and matching versions exactly is a nicety, not
+a correctness requirement, for a plain relational dump like this one.

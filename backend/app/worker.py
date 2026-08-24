@@ -43,6 +43,11 @@ celery_app.conf.update(
             "task": "app.worker.check_alerts",
             "schedule": 60 * 60,  # every 1h
         },
+        # Phase 8: full-database backup to S3.
+        "backup-database-nightly": {
+            "task": "app.worker.backup_database",
+            "schedule": 60 * 60 * 24,  # every 24h
+        },
     },
 )
 
@@ -131,3 +136,13 @@ def check_alerts_task() -> int:
         return len(check_alerts(db))
     finally:
         db.close()
+
+
+@celery_app.task(name="app.worker.backup_database")
+def backup_database_task() -> str:
+    """Dump the full database and upload it to S3 (Phase 8; scheduled
+    nightly; also triggered via POST /api/v1/admin/backups/run). Returns
+    the S3 key written."""
+    from app.services.backup import run_backup
+
+    return run_backup()

@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     alert_failed_run_rate_threshold: float = 0.25
     alert_daily_spend_usd_threshold: float = 20.00
 
+    # Database backups (Phase 8): nightly pg_dump uploaded to S3, gzipped,
+    # under a backups/postgres/ key prefix. Reuses s3_bucket_captures by
+    # default — the existing IAM policy already covers the whole bucket —
+    # set s3_bucket_backups to isolate the backup lifecycle in its own
+    # bucket instead.
+    s3_bucket_backups: str | None = None
+    backup_retention_days: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

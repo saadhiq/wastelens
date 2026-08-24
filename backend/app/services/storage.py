@@ -36,6 +36,15 @@ def _client():
     )
 
 
+def client():
+    """Public entry point for callers outside this module that need to
+    read/write objects under a different bucket or key prefix than tray
+    captures (e.g. services/backup.py's database dumps) — same client
+    construction as every function below, just not hardcoded to
+    s3_bucket_captures."""
+    return _client()
+
+
 def ensure_bucket() -> None:
     settings = get_settings()
     client = _client()
