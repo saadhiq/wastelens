@@ -1,22 +1,26 @@
-"""The CV analysis orchestrator — the heart of the Phase 1 pipeline.
+"""The CV analysis orchestrator — the heart of the Phase 1 pipeline, extended
+in Phase 2 to persist one InferenceRun row per provider call attempt.
 
 Called by the Celery task for one capture:
   load capture → download image → load vocabulary (from DB) → cost guard →
-  provider.analyze → validate strict JSON (one repair retry) →
-  fuzzy-match brands → write detections + review flags → mark capture done.
+  provider.analyze (→ InferenceRun row) → validate strict JSON (one repair
+  retry, its own InferenceRun row) → fuzzy-match brands → write detections
+  (linked to whichever InferenceRun produced them) + review flags → mark
+  capture done.
 
 On unrecoverable model output the capture is marked `failed` and the raw text
 is preserved in a single detection row for debugging.
 """
 
+import datetime as dt
 import json
 import uuid
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.core.logging import get_logger
 from app.models import (
     AnalysisStatus,
@@ -24,14 +28,33 @@ from app.models import (
     BagStatus,
     Capture,
     Detection,
+    InferenceRun,
+    InferenceRunStatus,
     VocabularyItem,
 )
 from app.services import storage
 from app.services.brand_match import match_brand
 from app.services.cost_guard import CostCapExceeded, register_cv_call
 from app.services.vision import VisionProvider, VisionResult, get_vision_provider
+from app.services.vision.base import ProviderResponse
 
 log = get_logger(__name__)
+
+
+def _configured_model_name(settings: Settings) -> str:
+    """Best-effort model identifier for an InferenceRun row written when the
+    provider call itself raised — before any real response.model exists."""
+    return (
+        settings.nvidia_vision_model
+        if settings.vision_provider.lower() == "nvidia"
+        else settings.vision_model
+    )
+
+
+def _overall_confidence(result: VisionResult) -> float | None:
+    if not result.detections:
+        return None
+    return sum(d.confidence for d in result.detections) / len(result.detections)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -60,6 +83,119 @@ def load_vocabulary(db: Session, bag_type) -> list[str]:
     )
 
 
+def _next_attempt_no(db: Session, capture_id: uuid.UUID) -> int:
+    """1 for a fresh capture; higher if this capture already has InferenceRun
+    rows (a Celery retry re-entering after a prior attempt was recorded).
+    Never reuses an attempt_no — that's what the (capture_id, attempt_no)
+    unique constraint depends on for idempotency."""
+    highest = db.scalar(
+        select(func.max(InferenceRun.attempt_no)).where(InferenceRun.capture_id == capture_id)
+    )
+    return (highest or 0) + 1
+
+
+def _classify_call_failure(exc: Exception) -> InferenceRunStatus:
+    if "timeout" in type(exc).__name__.lower():
+        return InferenceRunStatus.TIMEOUT
+    return InferenceRunStatus.FAILED_PROVIDER_ERROR
+
+
+def _run_attempt(
+    db: Session,
+    capture: Capture,
+    provider: VisionProvider,
+    image_bytes: bytes,
+    media_type: str,
+    vocabulary: list[str],
+    *,
+    attempt_no: int,
+    prior_invalid_output: str | None,
+    call_count: int,
+) -> tuple[InferenceRun, ProviderResponse, VisionResult | None]:
+    """Make one provider.analyze() call and persist its InferenceRun row.
+
+    Returns (run, response, parsed_result) — parsed_result is None when the
+    model's output didn't parse as valid JSON (status FAILED_INVALID_JSON).
+    If the provider call itself raises (network/provider error, timeout),
+    this function doesn't return at all: it writes the InferenceRun row
+    (status FAILED_PROVIDER_ERROR/TIMEOUT) and re-raises, so that failure is
+    never silently lost.
+    """
+    settings = get_settings()
+    started_at = dt.datetime.now(dt.UTC)
+    try:
+        response = provider.analyze(
+            image_bytes,
+            media_type,
+            capture.bag_type,
+            vocabulary,
+            prior_invalid_output=prior_invalid_output,
+        )
+    except Exception as exc:
+        run = InferenceRun(
+            capture_id=capture.id,
+            attempt_no=attempt_no,
+            provider_name=settings.vision_provider,
+            model_name=_configured_model_name(settings),
+            status=_classify_call_failure(exc),
+            error_message=str(exc),
+            started_at=started_at,
+            finished_at=dt.datetime.now(dt.UTC),
+        )
+        db.add(run)
+        db.commit()
+        log.warning(
+            "vision_call_failed",
+            capture_id=str(capture.id),
+            attempt_no=attempt_no,
+            status=run.status.value,
+            error=str(exc),
+        )
+        raise
+
+    try:
+        result: VisionResult | None = parse_vision_result(response.raw_text)
+        status = InferenceRunStatus.SUCCESS
+        error_message = None
+    except (ValueError, ValidationError) as exc:
+        result = None
+        status = InferenceRunStatus.FAILED_INVALID_JSON
+        error_message = str(exc)
+
+    run = InferenceRun(
+        capture_id=capture.id,
+        attempt_no=attempt_no,
+        provider_name=settings.vision_provider,
+        model_name=response.model,
+        model_version=response.model_version,
+        status=status,
+        latency_ms=response.latency_ms,
+        input_tokens=response.input_tokens,
+        output_tokens=response.output_tokens,
+        cost_usd=response.cost_usd,
+        overall_confidence=_overall_confidence(result) if result is not None else None,
+        raw_response=response.raw_response,
+        raw_text=response.raw_text,
+        error_message=error_message,
+        started_at=started_at,
+        finished_at=dt.datetime.now(dt.UTC),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    log.info(
+        "vision_call",
+        capture_id=str(capture.id),
+        attempt_no=attempt_no,
+        model=response.model,
+        latency_ms=response.latency_ms,
+        usage=response.usage,
+        daily_call_count=call_count,
+        outcome=status.value,
+    )
+    return run, response, result
+
+
 def analyze_capture(
     db: Session, capture_id: uuid.UUID, provider: VisionProvider | None = None
 ) -> None:
@@ -83,47 +219,42 @@ def analyze_capture(
 
         image_bytes, media_type = storage.download_image(capture.image_url)
         provider = provider or get_vision_provider()
+        attempt_no = _next_attempt_no(db, capture.id)
 
         call_count = register_cv_call()
-        response = provider.analyze(image_bytes, media_type, capture.bag_type, vocabulary)
-        log.info(
-            "vision_call",
-            capture_id=str(capture_id),
-            model=response.model,
-            latency_ms=response.latency_ms,
-            usage=response.usage,
-            daily_call_count=call_count,
-            outcome="ok",
+        run, response, result = _run_attempt(
+            db,
+            capture,
+            provider,
+            image_bytes,
+            media_type,
+            vocabulary,
+            attempt_no=attempt_no,
+            prior_invalid_output=None,
+            call_count=call_count,
         )
 
-        try:
-            result = parse_vision_result(response.raw_text)
-        except (ValueError, ValidationError):
+        if result is None:
             # One repair round: show the model its own invalid output.
-            register_cv_call()
-            repair = provider.analyze(
+            call_count = register_cv_call()
+            run, response, result = _run_attempt(
+                db,
+                capture,
+                provider,
                 image_bytes,
                 media_type,
-                capture.bag_type,
                 vocabulary,
+                attempt_no=attempt_no + 1,
                 prior_invalid_output=response.raw_text,
+                call_count=call_count,
             )
-            log.info(
-                "vision_call",
-                capture_id=str(capture_id),
-                model=repair.model,
-                latency_ms=repair.latency_ms,
-                usage=repair.usage,
-                outcome="repair_attempt",
-            )
-            try:
-                result = parse_vision_result(repair.raw_text)
-                response = repair
-            except (ValueError, ValidationError):
-                _fail_capture(db, capture, raw_output=repair.raw_text)
+            if result is None:
+                _fail_capture(db, capture, raw_output=response.raw_text, inference_run_id=run.id)
                 return
 
-        _store_detections(db, capture, result, raw_model_output=response.raw_text)
+        _store_detections(
+            db, capture, result, raw_model_output=response.raw_text, inference_run_id=run.id
+        )
         capture.analysis_status = AnalysisStatus.done
         bag = db.get(Bag, capture.bag_id)
         if bag is not None:
@@ -150,7 +281,11 @@ def analyze_capture(
 
 
 def _store_detections(
-    db: Session, capture: Capture, result: VisionResult, raw_model_output: str
+    db: Session,
+    capture: Capture,
+    result: VisionResult,
+    raw_model_output: str,
+    inference_run_id: uuid.UUID,
 ) -> None:
     threshold = get_settings().confidence_review_threshold
     vocabulary = set(load_vocabulary(db, capture.bag_type))
@@ -179,13 +314,18 @@ def _store_detections(
                 bbox=item.bbox,
                 needs_review=item.confidence < threshold,
                 raw_model_output=raw,
+                inference_run_id=inference_run_id,
             )
         )
 
 
-def _fail_capture(db: Session, capture: Capture, raw_output: str) -> None:
+def _fail_capture(
+    db: Session, capture: Capture, raw_output: str, inference_run_id: uuid.UUID | None = None
+) -> None:
     """Mark failed and keep the raw output on a placeholder detection row so
-    engineers can see exactly what the model produced."""
+    engineers can see exactly what the model produced. inference_run_id is
+    None only for the cost-cap-exceeded path, where no provider call (and so
+    no InferenceRun) ever happened."""
     capture.analysis_status = AnalysisStatus.failed
     db.add(
         Detection(
@@ -194,6 +334,7 @@ def _fail_capture(db: Session, capture: Capture, raw_output: str) -> None:
             confidence=0.0,
             needs_review=True,
             raw_model_output={"raw_text": raw_output, "error": "unparseable_model_output"},
+            inference_run_id=inference_run_id,
         )
     )
     db.commit()

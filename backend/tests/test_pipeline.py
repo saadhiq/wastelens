@@ -17,6 +17,8 @@ from app.models import (
     Capture,
     CollectionSession,
     Detection,
+    InferenceRun,
+    InferenceRunStatus,
     Resident,
     VocabularyItem,
 )
@@ -150,3 +152,104 @@ def test_brand_matching(db, capture_fixture):
     assert match_brand(db, "completely unrelated text zzz") is None
     assert match_brand(db, None) is None
     assert match_brand(db, "   ") is None
+
+
+# --- Phase 2: InferenceRun bookkeeping ---
+
+
+class RaisingProvider(VisionProvider):
+    """Simulates a network/provider-level failure — analyze() raises instead
+    of returning malformed text."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+        self.calls = 0
+
+    def analyze(self, image_bytes, media_type, bag_type, vocabulary, prior_invalid_output=None):
+        self.calls += 1
+        raise self._exc
+
+
+def test_malformed_first_attempt_produces_two_inference_runs(db, capture_fixture):
+    provider = FakeProvider(["oops, not json", GOOD_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    runs = (
+        db.query(InferenceRun)
+        .filter_by(capture_id=capture_fixture.id)
+        .order_by(InferenceRun.attempt_no)
+        .all()
+    )
+    assert len(runs) == 2
+    assert runs[0].attempt_no == 1
+    assert runs[0].status == InferenceRunStatus.FAILED_INVALID_JSON
+    assert runs[0].raw_text == "oops, not json"
+    assert runs[1].attempt_no == 2
+    assert runs[1].status == InferenceRunStatus.SUCCESS
+
+
+def test_detections_link_to_the_successful_attempt_not_the_failed_one(db, capture_fixture):
+    provider = FakeProvider(["oops, not json", GOOD_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    attempt_2 = db.query(InferenceRun).filter_by(capture_id=capture_fixture.id, attempt_no=2).one()
+    detections = db.query(Detection).filter_by(capture_id=capture_fixture.id).all()
+    assert len(detections) == 2
+    assert all(d.inference_run_id == attempt_2.id for d in detections)
+
+
+def test_rerunning_a_done_capture_is_a_noop(db, capture_fixture):
+    provider = FakeProvider([GOOD_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+    assert provider.calls == 1
+
+    run_count_before = db.query(InferenceRun).filter_by(capture_id=capture_fixture.id).count()
+    detection_count_before = db.query(Detection).filter_by(capture_id=capture_fixture.id).count()
+
+    # Re-run with a provider that would error if actually called — proves
+    # the early-return guard fires before any new attempt is made.
+    analyze_capture(
+        db, capture_fixture.id, provider=RaisingProvider(RuntimeError("should not run"))
+    )
+
+    assert (
+        db.query(InferenceRun).filter_by(capture_id=capture_fixture.id).count() == run_count_before
+    )
+    assert (
+        db.query(Detection).filter_by(capture_id=capture_fixture.id).count()
+        == detection_count_before
+    )
+
+
+def test_provider_error_recorded_as_its_own_inference_run_status(db, capture_fixture):
+    provider = RaisingProvider(ConnectionError("connection reset"))
+    with pytest.raises(ConnectionError):
+        analyze_capture(db, capture_fixture.id, provider=provider)
+
+    run = db.query(InferenceRun).filter_by(capture_id=capture_fixture.id).one()
+    assert run.attempt_no == 1
+    assert run.status == InferenceRunStatus.FAILED_PROVIDER_ERROR
+    assert "connection reset" in run.error_message
+    assert db.get(Capture, capture_fixture.id).analysis_status == AnalysisStatus.failed
+
+
+def test_retry_after_provider_error_continues_at_next_attempt_no(db, capture_fixture):
+    """A Celery retry re-enters analyze_capture for the same capture after a
+    prior attempt already wrote an InferenceRun row. attempt_no must advance,
+    not collide with the existing row (see _next_attempt_no)."""
+    with pytest.raises(ConnectionError):
+        analyze_capture(db, capture_fixture.id, provider=RaisingProvider(ConnectionError("boom")))
+
+    provider = FakeProvider([GOOD_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    runs = (
+        db.query(InferenceRun)
+        .filter_by(capture_id=capture_fixture.id)
+        .order_by(InferenceRun.attempt_no)
+        .all()
+    )
+    assert [r.attempt_no for r in runs] == [1, 2]
+    assert runs[0].status == InferenceRunStatus.FAILED_PROVIDER_ERROR
+    assert runs[1].status == InferenceRunStatus.SUCCESS
+    assert db.get(Capture, capture_fixture.id).analysis_status == AnalysisStatus.done

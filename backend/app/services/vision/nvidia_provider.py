@@ -73,10 +73,18 @@ class NvidiaVisionProvider(VisionProvider):
         latency_ms = int((time.monotonic() - started) * 1000)
         response.raise_for_status()
         body = response.json()
+        usage = body.get("usage", {})
 
         return ProviderResponse(
             raw_text=body["choices"][0]["message"]["content"],
             model=self._model,
             latency_ms=latency_ms,
-            usage=body.get("usage", {}),
+            usage=usage,
+            # OpenAI-compatible naming, distinct from Anthropic's below.
+            input_tokens=usage.get("prompt_tokens"),
+            output_tokens=usage.get("completion_tokens"),
+            # The model NVIDIA actually resolved the request to, which can
+            # differ subtly from the requested self._model.
+            model_version=body.get("model"),
+            raw_response=body,
         )

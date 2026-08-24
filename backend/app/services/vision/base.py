@@ -6,6 +6,7 @@ never touches the pipeline.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,12 +35,26 @@ class VisionResult(BaseModel):
 @dataclass
 class ProviderResponse:
     """Raw provider output plus observability metadata. Parsing/validation of
-    raw_text into VisionResult happens in app.services.analysis."""
+    raw_text into VisionResult happens in app.services.analysis.
+
+    input_tokens/output_tokens/cost_usd/model_version/raw_response were added
+    in Phase 2 so app.services.analysis can persist a full InferenceRun row
+    per attempt without digging through `usage` (whose keys differ per
+    provider — NVIDIA's OpenAI-compatible response uses prompt_tokens/
+    completion_tokens, Anthropic's uses input_tokens/output_tokens; `usage`
+    itself is kept as-is for backwards compatibility). cost_usd is left None
+    by both providers today — no per-token pricing table exists yet, so
+    computing it would be inventing data rather than reading it."""
 
     raw_text: str
     model: str
     latency_ms: int
     usage: dict[str, Any] = field(default_factory=dict)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: Decimal | None = None
+    model_version: str | None = None
+    raw_response: dict[str, Any] | None = None
 
 
 class VisionProvider(ABC):

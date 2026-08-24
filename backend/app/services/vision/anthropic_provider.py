@@ -66,4 +66,8 @@ class AnthropicVisionProvider(VisionProvider):
                 "input_tokens": message.usage.input_tokens,
                 "output_tokens": message.usage.output_tokens,
             },
+            input_tokens=message.usage.input_tokens,
+            output_tokens=message.usage.output_tokens,
+            model_version=message.model,
+            raw_response=message.model_dump(mode="json"),
         )
