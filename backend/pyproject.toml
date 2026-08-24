@@ -21,13 +21,16 @@ dependencies = [
     "bcrypt>=4.2",
     "python-multipart>=0.0.18",
     "structlog>=24.4",
+    # Phase 4: reads image width/height server-side on capture upload — a
+    # runtime dependency, not a dev/test-only one (was misclassified under
+    # optional-dependencies.dev before this was ever imported outside tests).
+    "pillow>=11.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "pillow>=11.0",
     "ruff>=0.8",
     "mypy>=1.13",
     "pre-commit>=4.0",

@@ -45,6 +45,11 @@ class StaffRole(enum.StrEnum):
     station_operator = "station_operator"
     reviewer = "reviewer"
     analyst = "analyst"
+    # Phase 4: field staff who run a collection route. Added here (not a new
+    # enum) so it gets the same login/JWT/RBAC machinery as every other role
+    # for free — a Collector row (operations.py) is the 1-1 profile that
+    # holds route-specific fields this enum member alone doesn't carry.
+    collector = "collector"
 
 
 # --- Phase 1 domain model extension ---

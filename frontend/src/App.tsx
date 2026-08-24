@@ -1,7 +1,9 @@
 import { Link, Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch, getToken, setToken } from "./lib/api";
+import Admin from "./pages/Admin";
 import Analytics from "./pages/Analytics";
+import Collector from "./pages/Collector";
 import Login from "./pages/Login";
 import Review from "./pages/Review";
 import Station from "./pages/Station";
@@ -14,8 +16,10 @@ export default function App() {
       <Route element={<AuthedLayout />}>
         <Route path="/" element={<Navigate to="/station" replace />} />
         <Route path="/station" element={<Station />} />
+        <Route path="/collector" element={<Collector />} />
         <Route path="/review" element={<Review />} />
         <Route path="/analytics" element={<Analytics />} />
+        <Route path="/admin" element={<Admin />} />
       </Route>
     </Routes>
   );
@@ -46,12 +50,20 @@ function AuthedLayout() {
           <Link to="/station" className="text-sm text-gray-600 hover:text-emerald-700">
             Station
           </Link>
+          <Link to="/collector" className="text-sm text-gray-600 hover:text-emerald-700">
+            Collector
+          </Link>
           <Link to="/review" className="text-sm text-gray-600 hover:text-emerald-700">
             Review
           </Link>
           <Link to="/analytics" className="text-sm text-gray-600 hover:text-emerald-700">
             Analytics
           </Link>
+          {me.data?.role === "admin" && (
+            <Link to="/admin" className="text-sm text-gray-600 hover:text-emerald-700">
+              Admin
+            </Link>
+          )}
         </nav>
         <div className="flex items-center gap-3 text-sm">
           {me.data && (

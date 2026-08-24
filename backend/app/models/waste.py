@@ -67,6 +67,19 @@ class Bag(Base):
         ForeignKey("bins.id", ondelete="SET NULL"), nullable=True
     )
 
+    # --- Phase 4: which collection run picked this bag up ---
+    # Phase 1 only linked a Bag to a CollectionSession indirectly, through
+    # Capture (session_id + bag_id) — but a Capture only exists once the bag
+    # reaches the station. The collector needs to attach bags to a session
+    # at the doorstep, before any capture happens, so that link has to live
+    # on Bag directly. Nullable: a bag can be registered long before it's
+    # ever collected.
+    collection_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+    session: Mapped["CollectionSession | None"] = relationship(back_populates="bags")
+
     @property
     def net_weight_kg(self) -> Decimal | None:
         """Computed, not stored — None until both weights are recorded."""
@@ -103,6 +116,7 @@ class CollectionSession(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     captures: Mapped[list["Capture"]] = relationship(back_populates="session")
+    bags: Mapped[list["Bag"]] = relationship(back_populates="session")
 
 
 class Capture(Base):

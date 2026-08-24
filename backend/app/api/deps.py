@@ -19,8 +19,9 @@ from app.models import StaffAccount, StaffRole
 
 _bearer = HTTPBearer(auto_error=False)
 
-# Roles allowed to read resident PII (name, phone, address).
-PII_ROLES = (StaffRole.admin, StaffRole.station_operator)
+# Roles allowed to read resident PII (name, phone, address). Collectors
+# (Phase 4) need this at the doorstep to look up a household by phone/QR.
+PII_ROLES = (StaffRole.admin, StaffRole.station_operator, StaffRole.collector)
 
 
 def get_current_account(

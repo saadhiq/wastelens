@@ -1,6 +1,16 @@
 import { useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ApiError, apiFetch, getCapture, uploadCapture, type Capture } from "../lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ApiError,
+  apiFetch,
+  getBag,
+  getCapture,
+  listStations,
+  uploadCapture,
+  weighBag,
+  type Capture,
+  type InferenceRun,
+} from "../lib/api";
 
 /**
  * Station Capture: upload one tray photo per emptied bag, watch analysis live,
@@ -20,6 +30,12 @@ export default function Station() {
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // --- Phase 4: station/tray selector + lighting condition ---
+  const [inspectionStationId, setInspectionStationId] = useState("");
+  const [trayCode, setTrayCode] = useState("");
+  const [lightingCondition, setLightingCondition] = useState("");
+  const stations = useQuery({ queryKey: ["stations"], queryFn: () => listStations() });
 
   // Poll the capture every 2.5s until analysis reaches a terminal state.
   const capture = useQuery({
@@ -47,7 +63,11 @@ export default function Station() {
     setError(null);
     localStorage.setItem(STATION_ID_KEY, stationId);
     try {
-      const created = await uploadCapture(file, bagTag.trim(), stationId.trim());
+      const created = await uploadCapture(file, bagTag.trim(), stationId.trim(), {
+        inspectionStationId: inspectionStationId || undefined,
+        trayCode: trayCode.trim() || undefined,
+        lightingCondition: lightingCondition || undefined,
+      });
       setCaptureId(created.id);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Upload failed");
@@ -93,6 +113,45 @@ export default function Station() {
             </div>
           </div>
 
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium">Inspection station</label>
+              <select
+                value={inspectionStationId}
+                onChange={(e) => setInspectionStationId(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 p-3 text-base focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="">(none)</option>
+                {(stations.data?.items ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.station_code}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Tray</label>
+              <input
+                value={trayCode}
+                onChange={(e) => setTrayCode(e.target.value)}
+                placeholder="TRAY-1"
+                className="w-full rounded-lg border border-gray-300 p-3 text-base focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium">Lighting</label>
+              <select
+                value={lightingCondition}
+                onChange={(e) => setLightingCondition(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 p-3 text-base focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="">(unspecified)</option>
+                <option value="OVERHEAD_LED">Overhead LED</option>
+                <option value="MIXED_DAYLIGHT">Mixed daylight</option>
+              </select>
+            </div>
+          </div>
+
           <div>
             <label className="mb-1 block text-sm font-medium">Tray photo</label>
             <input
@@ -132,6 +191,10 @@ export default function Station() {
               saved for engineers to inspect.
             </p>
           )}
+          {(status === "done" || status === "failed") && capture.data && (
+            <InferenceRunHistory runs={capture.data.inference_runs ?? []} />
+          )}
+          {status === "done" && capture.data && <WeighInField bagId={capture.data.bag_id} />}
           {(status === "done" || status === "failed") && (
             <button
               onClick={nextBag}
@@ -168,6 +231,101 @@ function StatusBanner({ status }: { status?: string }) {
         <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
       )}
       <span className="font-semibold">{labels[s]}</span>
+    </div>
+  );
+}
+
+/** Phase 4: every vision-model attempt for this capture, not just the
+ * winning one — lets the operator see why a repair retry happened. */
+function InferenceRunHistory({ runs }: { runs: InferenceRun[] }) {
+  if (runs.length === 0) return null;
+  const sorted = [...runs].sort((a, b) => a.attempt_no - b.attempt_no);
+  return (
+    <div className="mt-4 rounded-lg border border-gray-200 p-3 text-sm">
+      <p className="mb-2 font-semibold text-gray-700">Model attempts ({sorted.length})</p>
+      <ul className="space-y-1">
+        {sorted.map((r) => (
+          <li key={r.id} className="flex items-center justify-between text-gray-600">
+            <span>
+              #{r.attempt_no} · {r.provider_name}/{r.model_name}
+              {r.error_message && <span className="ml-2 text-red-600">{r.error_message}</span>}
+            </span>
+            <span className="flex items-center gap-2">
+              {r.latency_ms !== null && <span className="tabular-nums">{r.latency_ms}ms</span>}
+              <span
+                className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                  r.status === "SUCCESS"
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-800"
+                }`}
+              >
+                {r.status}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Phase 4: shown only once analysis is done, and only while the bag has no
+ * recorded weight — most bags are already weighed at the doorstep by the
+ * collector, this covers the ones that aren't. */
+function WeighInField({ bagId }: { bagId: string }) {
+  const qc = useQueryClient();
+  const bag = useQuery({ queryKey: ["bag", bagId], queryFn: () => getBag(bagId) });
+  const [gross, setGross] = useState("");
+  const [tare, setTare] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  if (bag.isLoading || !bag.data) return null;
+  if (bag.data.gross_weight_kg !== null) return null;
+
+  async function save() {
+    setSaving(true);
+    try {
+      await weighBag(bagId, { gross_weight_kg: gross, tare_weight_kg: tare || undefined });
+      setSaved(true);
+      qc.invalidateQueries({ queryKey: ["bag", bagId] });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (saved) return <p className="mt-4 text-sm text-emerald-700">Weight recorded.</p>;
+
+  return (
+    <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
+      <p className="mb-2 text-sm font-semibold text-amber-800">This bag has no recorded weight</p>
+      <div className="flex flex-wrap items-end gap-2">
+        <div>
+          <label className="mb-1 block text-xs text-amber-700">Gross (kg)</label>
+          <input
+            inputMode="decimal"
+            value={gross}
+            onChange={(e) => setGross(e.target.value)}
+            className="w-24 rounded-lg border border-amber-300 p-2"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-amber-700">Tare (kg)</label>
+          <input
+            inputMode="decimal"
+            value={tare}
+            onChange={(e) => setTare(e.target.value)}
+            className="w-24 rounded-lg border border-amber-300 p-2"
+          />
+        </div>
+        <button
+          onClick={save}
+          disabled={!gross || saving}
+          className="rounded-lg bg-amber-600 px-4 py-2 font-semibold text-white disabled:opacity-40"
+        >
+          {saving ? "Saving…" : "Save weight"}
+        </button>
+      </div>
     </div>
   );
 }

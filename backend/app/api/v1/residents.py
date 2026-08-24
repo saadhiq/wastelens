@@ -66,6 +66,42 @@ def list_residents(
     )
 
 
+@router.get("/by-phone/{phone}", response_model=ResidentOut)
+def lookup_by_phone(
+    phone: str,
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*PII_ROLES)),
+) -> Resident:
+    """Phase 4: the collector's doorstep lookup. Same PII gating and audit
+    trail as get_resident — a phone-number search surfaces the same PII."""
+    resident = db.scalar(select(Resident).where(Resident.phone == phone))
+    if resident is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resident not found")
+    record(
+        db, actor_id=account.id, action="pii.read", entity_type="user", entity_id=str(resident.id)
+    )
+    db.commit()
+    return resident
+
+
+@router.get("/by-qr/{qr_code}", response_model=ResidentOut)
+def lookup_by_qr(
+    qr_code: str,
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*PII_ROLES)),
+) -> Resident:
+    """Phase 4: the collector's QR-scan lookup (Resident.qr_code — the
+    household's own code, distinct from a Bag's tag_id)."""
+    resident = db.scalar(select(Resident).where(Resident.qr_code == qr_code))
+    if resident is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resident not found")
+    record(
+        db, actor_id=account.id, action="pii.read", entity_type="user", entity_id=str(resident.id)
+    )
+    db.commit()
+    return resident
+
+
 @router.get("/{user_id}", response_model=ResidentOut)
 def get_resident(
     user_id: uuid.UUID,

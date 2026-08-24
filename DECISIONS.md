@@ -194,3 +194,87 @@ unset, so non-Docker/single-host setups need no change) and signing
 presigned URLs against it specifically, while every other `storage.py` call
 keeps using the internal `s3_endpoint_url`. Local Docker dev sets it to
 `http://localhost:9000` in `.env`/`.env.example`.
+
+## 18. `collector` is a `StaffRole`, not a new login concept
+Phase 4's field-staff collector needs a login (mobile app auth) and role
+gating exactly like every other staff type — there was no reason to invent
+a parallel auth mechanism. Added `collector` as a fifth `StaffRole` value
+(migration 0005, `ALTER TYPE staff_role ADD VALUE` — safe inside Alembic's
+normal transactional wrapper on Postgres 12+ since nothing in that same
+migration uses the new value). `Collector` (operations.py, added in Phase 1)
+stays the 1—1 profile row holding route-specific fields (employee_code,
+default_vehicle_code) that the role alone doesn't carry — same split as
+`Resident` vs. `StaffAccount` (#1), applied one level down.
+
+Downgrading 0005 does not remove the enum value: Postgres has no `DROP
+VALUE`; doing so for real means rebuilding the type and every column that
+uses it. Left as a documented no-op.
+
+Also added to `PII_ROLES` (api/deps.py) — a collector at the doorstep
+legitimately needs to see the household's name/phone/address to confirm
+they're at the right door, same justification as `station_operator`.
+
+## 19. `Bag.collection_session_id`: the doorstep needs a link Phase 1 didn't add
+Phase 1 connected a `Bag` to a `CollectionSession` only indirectly, through
+`Capture` (`session_id` + `bag_id`) — correct for the station flow, where a
+capture is the first time a bag and a session meet. Phase 4's collector
+flow breaks that assumption: bags are attached to a session at the door,
+before any capture exists. Rather than force the collector's nested
+session-create to invent a fake capture just to record that link, added a
+direct nullable `Bag.collection_session_id` FK (migration 0006). Every
+existing bag predates it; nothing about the station flow's use of
+`Capture.session_id`/`bag_id` changes.
+
+## 20. Nested session bags: reuse-by-tag, not create-only
+`POST /sessions`'s nested `bags` accept an optional `tag_id`. If it matches
+an existing `Bag`, that bag is reused (and reweighed) rather than rejected
+as a duplicate — the domain has always assumed bags are pre-tagged ahead of
+collection (see `POST /bags` and `GET /bags/by-tag/{tag_id}`, both
+pre-Phase-4). If the tag doesn't exist yet, or the collector had no working
+QR to scan (offline, damaged tag), a new `Bag` is created — with the given
+tag, or a server-generated `auto-{hex}` one — so ad-hoc doorstep bags and
+pre-registered ones go through the identical call.
+
+A reused tag that belongs to a different resident, or was registered under
+a different `bag_type`, is rejected with 409 rather than silently
+overwritten — either case means the collector scanned the wrong bag, and
+silently reassigning it would corrupt that bag's history.
+
+## 21. Calendar seeding is an idempotent script, not a migration
+`CalendarDay` rows are seeded by `app/seeds/seed.py:seed_calendar_days()`
+(current year through next year, relative to whenever it's run), not a
+migration. A migration's content is fixed at the moment it's written, but
+"the current year" is only meaningful at deploy time — baking `date.today()`
+into a migration would seed whatever year the migration was authored in,
+not the year it's actually applied. The existing `seed.py` (vocabulary,
+brands, bootstrap admin) already established the idempotent-script pattern
+for exactly this kind of run-whenever-you-like reference data, unlike the
+one-time schema-bound backfill in migration 0003.
+
+`is_poya` and `is_public_holiday` are seeded `False` for every row, never
+inferred — per Phase 4's explicit instruction, this project does not
+hardcode a Poya calendar (it varies year to year; getting it wrong would
+quietly corrupt every seasonality feature built on top of it later).
+Admins fill both in via `PATCH /calendar/{date}`; the seed function never
+overwrites an existing row, so a rerun can't clobber those edits.
+
+## 22. Duplicate-photo rejection is scoped to `(bag_id, image_sha256)`, not global
+`POST /captures` rejects a re-upload of the exact same photo bytes for the
+*same bag* with 409 — enforced by both an app-level pre-check (friendlier
+error) and the pre-existing `uq_captures_bag_image_sha256` constraint
+(the real guarantee under concurrent uploads, caught via `IntegrityError`).
+The same photo bytes uploaded for a *different* bag are allowed: nothing
+prevents two different households' trays from photographing similarly (or,
+in a test, identically) — sha256 collision across bags is not evidence of
+anything wrong, only a same-bag repeat is.
+
+## 23. `pillow` moved from dev-only extras to real runtime dependencies
+`pillow` was already listed in `pyproject.toml` (Phase 1 era) but under
+`[project.optional-dependencies].dev` — nothing imported it outside tests,
+so `pip install .` (what the Dockerfile actually runs) never installed it,
+and the gap went unnoticed. Phase 4's `POST /captures` is the first
+production code path to `from PIL import Image` (reading width/height on
+upload) — caught immediately on rebuilding the real `api` container for
+Phase 4 verification (`ModuleNotFoundError: No module named 'PIL'`; the
+host dev venv had it because that venv was set up with the `[dev]` extra,
+masking the gap locally). Moved to the main `dependencies` list.

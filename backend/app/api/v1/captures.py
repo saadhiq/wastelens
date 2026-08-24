@@ -5,10 +5,14 @@ enqueues the async analysis job — it returns immediately with the capture id.
 An Idempotency-Key header makes retries safe on flaky station connections.
 """
 
+import hashlib
+import io
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
+from PIL import Image
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
@@ -20,10 +24,12 @@ from app.models import (
     BagStatus,
     Capture,
     CollectionSession,
+    InspectionStation,
+    LightingCondition,
     StaffAccount,
     StaffRole,
 )
-from app.schemas.captures import CaptureDetail, CaptureOut, SessionCreate, SessionOut
+from app.schemas.captures import CaptureDetail, CaptureOut
 from app.schemas.common import Page
 from app.services import storage
 from app.services.audit import record
@@ -42,25 +48,15 @@ def enqueue_analysis(capture_id: uuid.UUID) -> None:
     analyze_capture_task.delay(str(capture_id))
 
 
-@router.post("/sessions", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
-def create_session(
-    body: SessionCreate,
-    db: Session = Depends(get_db),
-    account: StaffAccount = Depends(require_roles(*_CAPTURE_ROLES)),
-) -> CollectionSession:
-    session = CollectionSession(user_id=body.user_id)
-    db.add(session)
-    db.commit()
-    db.refresh(session)
-    return session
-
-
 @router.post("/captures", response_model=CaptureOut, status_code=status.HTTP_201_CREATED)
 def create_capture(
     image: UploadFile = File(...),
     bag_tag_id: str = Form(...),
     station_id: str = Form(...),
     session_id: uuid.UUID | None = Form(None),
+    inspection_station_id: uuid.UUID | None = Form(None),
+    tray_code: str | None = Form(None),
+    lighting_condition: LightingCondition | None = Form(None),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(require_roles(*_CAPTURE_ROLES)),
@@ -83,6 +79,14 @@ def create_capture(
     if bag is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown bag tag")
 
+    if (
+        inspection_station_id is not None
+        and db.get(InspectionStation, inspection_station_id) is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Unknown inspection station"
+        )
+
     # Auto-create a session when the station didn't send one (see DECISIONS.md).
     if session_id is not None:
         session = db.get(CollectionSession, session_id)
@@ -93,9 +97,31 @@ def create_capture(
         db.add(session)
         db.flush()
 
+    data = image.file.read()
+    image_sha256 = hashlib.sha256(data).hexdigest()
+
+    # Reject a duplicate photo of the same bag before touching storage — the
+    # DB unique constraint (bag_id, image_sha256) is the real guarantee
+    # under concurrency, this is just a friendlier error than a raw 500.
+    dup = db.scalar(
+        select(Capture).where(Capture.bag_id == bag.id, Capture.image_sha256 == image_sha256)
+    )
+    if dup is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This exact photo has already been uploaded for this bag",
+        )
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            image_width, image_height = img.size
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unreadable image file"
+        ) from exc
+
     capture_id = uuid.uuid4()
     key = storage.object_key(str(capture_id), media_type)
-    data = image.file.read()
     storage.upload_image(key, data, media_type)
 
     capture = Capture(
@@ -108,6 +134,13 @@ def create_capture(
         operator_id=account.id,
         analysis_status=AnalysisStatus.pending,
         idempotency_key=idempotency_key,
+        inspection_station_id=inspection_station_id,
+        tray_code=tray_code,
+        lighting_condition=lighting_condition,
+        image_sha256=image_sha256,
+        image_width=image_width,
+        image_height=image_height,
+        file_size_bytes=len(data),
     )
     bag.status = BagStatus.collected
     db.add(capture)
@@ -119,7 +152,14 @@ def create_capture(
         entity_id=str(capture_id),
         detail={"station_id": station_id, "bag_type": bag.bag_type.value},
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This exact photo has already been uploaded for this bag",
+        ) from exc
     db.refresh(capture)
 
     enqueue_analysis(capture.id)

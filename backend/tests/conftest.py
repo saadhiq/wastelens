@@ -159,6 +159,24 @@ def station_operator_account(db_engine):
     return {"email": email, "password": "station-pass-123", "id": str(account.id)}
 
 
+@pytest.fixture()
+def collector_account(db_engine):
+    TestSession = sessionmaker(bind=db_engine)
+    db = TestSession()
+    email = f"collector-{uuid.uuid4().hex[:8]}@wastelens-test.io"
+    account = StaffAccount(
+        email=email,
+        full_name="Test Collector",
+        hashed_password=hash_password("collector-pass-123"),
+        role=StaffRole.collector,
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    db.close()
+    return {"email": email, "password": "collector-pass-123", "id": str(account.id)}
+
+
 def login(client: TestClient, email: str, password: str) -> dict[str, str]:
     resp = client.post("/api/v1/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.text
