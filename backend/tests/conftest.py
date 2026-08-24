@@ -18,6 +18,7 @@ from app.core.security import hash_password
 from app.db import get_db
 from app.main import app
 from app.models import Base, StaffAccount, StaffRole
+from app.services.barcode import zbar_available
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -36,6 +37,10 @@ def _db_available() -> bool:
 
 requires_db = pytest.mark.skipif(
     not _db_available(), reason="test database not reachable (set TEST_DATABASE_URL)"
+)
+
+requires_zbar = pytest.mark.skipif(
+    not zbar_available, reason="libzbar not loadable on this host (see DECISIONS.md)"
 )
 
 

@@ -221,6 +221,10 @@ class Detection(Base):
     product_name_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     pack_size_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     barcode_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 5: packaging composition as read off the item (e.g. "PET
+    # plastic", "cardboard") — only ever populated by the v2 paper/polythene
+    # prompt (prompts.py); organic/general leave it null.
+    material_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     item_state: Mapped[ItemState | None] = mapped_column(
         Enum(ItemState, name="item_state"), nullable=True, index=True
     )

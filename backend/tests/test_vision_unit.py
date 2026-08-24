@@ -27,8 +27,12 @@ def test_prompt_contains_vocabulary_and_guidance():
 
 def test_each_bag_type_gets_distinct_guidance():
     prompts = {bt: build_analysis_prompt(bt, VOCAB) for bt in BagType}
-    assert "OCR" in prompts[BagType.polythene]
-    assert "OCR" in prompts[BagType.paper]
+    # Phase 5: polythene/paper moved to the v2 packaging-extraction contract
+    # (brand_text/product_name_text/pack_size_text/barcode_text as
+    # structured fields), so they no longer mention "OCR" as a concept —
+    # they ask for the specific fields that used to be dumped into it.
+    assert "brand_text" in prompts[BagType.polythene]
+    assert "brand_text" in prompts[BagType.paper]
     assert "conservative" in prompts[BagType.general].lower()
     assert len({p for p in prompts.values()}) == 4  # all different
 

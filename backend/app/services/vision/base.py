@@ -15,7 +15,14 @@ from app.models.base import BagType
 
 
 class VisionDetectionItem(BaseModel):
-    """One item the model claims to see on the tray."""
+    """One item the model claims to see on the tray.
+
+    brand_text/product_name_text/pack_size_text/barcode_text/material_type
+    (Phase 5) are only ever populated by the v2 paper/polythene prompts
+    (see vision/prompts.py) — organic/general keep the v1 contract and
+    leave these None. All optional here regardless of which prompt was
+    used, since parsing must succeed either way.
+    """
 
     item_name: str
     subcategory: str | None = None
@@ -23,6 +30,11 @@ class VisionDetectionItem(BaseModel):
     estimated_quantity: str | None = None
     ocr_text: str | None = None
     bbox: dict[str, Any] | None = None
+    brand_text: str | None = None
+    product_name_text: str | None = None
+    pack_size_text: str | None = None
+    barcode_text: str | None = None
+    material_type: str | None = None
 
 
 class VisionResult(BaseModel):

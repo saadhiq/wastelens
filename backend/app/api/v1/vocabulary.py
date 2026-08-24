@@ -15,7 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_account, require_roles
 from app.db import get_db
-from app.models import BagType, StaffAccount, StaffRole, UnmappedLabel, VocabularyItem
+from app.models import (
+    BagType,
+    StaffAccount,
+    StaffRole,
+    UnmappedLabel,
+    UnmappedLabelKind,
+    VocabularyItem,
+)
 from app.schemas.catalog import (
     PromoteUnmappedLabel,
     UnmappedLabelOut,
@@ -39,10 +46,16 @@ def list_unmapped_labels(
     db: Session = Depends(get_db),
     account: StaffAccount = Depends(get_current_account),
     resolved: bool = Query(False),
+    # Defaults to ITEM so this endpoint's existing consumer (the review
+    # page's vocabulary inbox) sees exactly what it always has — Phase 5's
+    # BRAND rows surface separately, via GET /analytics/unmapped-brands.
+    label_kind: UnmappedLabelKind = Query(UnmappedLabelKind.ITEM),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ) -> Page[UnmappedLabelOut]:
-    query = select(UnmappedLabel).where(UnmappedLabel.resolved.is_(resolved))
+    query = select(UnmappedLabel).where(
+        UnmappedLabel.resolved.is_(resolved), UnmappedLabel.label_kind == label_kind
+    )
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = db.scalars(
         query.order_by(UnmappedLabel.occurrence_count.desc()).limit(limit).offset(offset)
@@ -73,6 +86,11 @@ def promote_unmapped_label(
         )
     if unmapped.resolved:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already resolved")
+    if unmapped.label_kind != UnmappedLabelKind.ITEM:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only ITEM-kind unmapped labels can be promoted into vocabulary",
+        )
 
     item_name = body.item_name or unmapped.raw_label
     existing = db.scalar(

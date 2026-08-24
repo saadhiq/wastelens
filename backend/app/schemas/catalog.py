@@ -6,7 +6,7 @@ import uuid
 
 from pydantic import BaseModel
 
-from app.models.base import BagType
+from app.models.base import BagType, UnmappedLabelKind
 
 
 class VocabularyItemCreate(BaseModel):
@@ -72,6 +72,7 @@ class UnmappedLabelOut(BaseModel):
     id: uuid.UUID
     raw_label: str
     bag_type: BagType
+    label_kind: UnmappedLabelKind
     occurrence_count: int
     first_seen_at: dt.datetime
     last_seen_at: dt.datetime

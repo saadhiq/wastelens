@@ -20,6 +20,8 @@ from app.models import (
     InferenceRun,
     InferenceRunStatus,
     Resident,
+    UnmappedLabel,
+    UnmappedLabelKind,
     VocabularyItem,
 )
 from app.services.analysis import analyze_capture
@@ -152,6 +154,119 @@ def test_brand_matching(db, capture_fixture):
     assert match_brand(db, "completely unrelated text zzz") is None
     assert match_brand(db, None) is None
     assert match_brand(db, "   ") is None
+
+
+# --- Phase 5: packaging extraction (brand/product/pack-size/barcode/material) ---
+
+V2_RESPONSE = json.dumps(
+    {
+        "detections": [
+            {
+                "item_name": "chips_packet",
+                "confidence": 0.91,
+                "brand_text": "Munchee",
+                "product_name_text": "Super Cream Cracker",
+                "pack_size_text": "100g",
+                "barcode_text": "8901030826501",
+                "material_type": "BOPP plastic film",
+            },
+            {
+                "item_name": "chips_packet",
+                "confidence": 0.85,
+                "brand_text": "TotallyUnknownBrandXYZ",
+                "material_type": "LDPE film",
+            },
+        ],
+        "tray_notes": None,
+    }
+)
+
+
+def test_packaging_fields_stored_on_detection(db, capture_fixture):
+    provider = FakeProvider([V2_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    detections = (
+        db.query(Detection)
+        .filter_by(capture_id=capture_fixture.id)
+        .order_by(Detection.confidence)
+        .all()
+    )
+    assert len(detections) == 2
+    known = detections[1]
+    assert known.brand_text == "Munchee"
+    assert known.product_name_text == "Super Cream Cracker"
+    assert known.pack_size_text == "100g"
+    assert known.material_type == "BOPP plastic film"
+    assert known.matched_brand_id is not None
+
+
+def test_unmatched_brand_recorded_as_unmapped_label(db, capture_fixture):
+    # A brand text unique to this test — other tests in this file also
+    # process V2_RESPONSE's "TotallyUnknownBrandXYZ" against the same
+    # (non-rolled-back) DB session, so asserting an exact occurrence_count
+    # against that shared literal would be order-dependent. See DECISIONS.md
+    # / the Phase 2 test-scoping lesson this mirrors.
+    unique_brand = f"UnknownBrand-{uuid.uuid4().hex[:8]}"
+    response = json.dumps(
+        {
+            "detections": [
+                {"item_name": "chips_packet", "confidence": 0.85, "brand_text": unique_brand}
+            ],
+            "tray_notes": None,
+        }
+    )
+    provider = FakeProvider([response])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    unmapped = (
+        db.query(UnmappedLabel)
+        .filter_by(raw_label=unique_brand, label_kind=UnmappedLabelKind.BRAND)
+        .one_or_none()
+    )
+    assert unmapped is not None
+    assert unmapped.bag_type == BagType.polythene
+    assert unmapped.occurrence_count == 1
+
+    # Seeing the same unmatched brand again increments, not duplicates.
+    from app.services.brand_match import record_unmapped_brand
+
+    record_unmapped_brand(db, unique_brand, BagType.polythene)
+    db.commit()
+    db.refresh(unmapped)
+    assert unmapped.occurrence_count == 2
+
+
+def test_barcode_source_recorded_when_no_decode_pass_finds_anything(db, capture_fixture):
+    # capture_fixture's image bytes are fake ("fake-image-bytes"), so
+    # decode_barcodes always returns [] here — this exercises the
+    # falls-back-to-model-OCR path, not the decoded-wins path (that's
+    # covered by services/barcode.py's own tests against real images).
+    provider = FakeProvider([V2_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    detections = (
+        db.query(Detection)
+        .filter_by(capture_id=capture_fixture.id)
+        .order_by(Detection.confidence)
+        .all()
+    )
+    known = detections[1]  # brand_text="Munchee", the one with barcode_text set
+    assert known.barcode_text == "8901030826501"
+    assert known.raw_model_output["barcode_source"] == "ocr"
+
+    unknown = detections[0]  # no barcode_text from the model at all
+    assert unknown.barcode_text is None
+    assert unknown.raw_model_output["barcode_source"] is None
+
+
+def test_prompt_version_stamped_on_inference_run(db, capture_fixture):
+    """capture_fixture is a polythene bag — Phase 5's v2 packaging contract."""
+    provider = FakeProvider([V2_RESPONSE])
+    analyze_capture(db, capture_fixture.id, provider=provider)
+
+    run = db.query(InferenceRun).filter_by(capture_id=capture_fixture.id).one()
+    assert run.prompt_version == "v2"
 
 
 # --- Phase 2: InferenceRun bookkeeping ---

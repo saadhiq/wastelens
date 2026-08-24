@@ -1,8 +1,37 @@
 """Analytics endpoint tests: role gating and response shapes."""
 
+import uuid
+
+import pytest
+from sqlalchemy.orm import sessionmaker
+
+from app.models import (
+    AnalysisStatus,
+    Bag,
+    BagType,
+    Capture,
+    CollectionSession,
+    Detection,
+    HumanReview,
+    InferenceRun,
+    InferenceRunStatus,
+    Resident,
+    ReviewStatus,
+    ReviewVerdict,
+    UnmappedLabel,
+    UnmappedLabelKind,
+)
 from tests.conftest import login, requires_db
 
 pytestmark = requires_db
+
+
+@pytest.fixture()
+def db(db_engine):
+    Session = sessionmaker(bind=db_engine, expire_on_commit=False)
+    s = Session()
+    yield s
+    s.close()
 
 
 def test_analytics_requires_analyst_role(client, admin_account):
@@ -38,7 +67,21 @@ def test_quality_report_shape(client, admin_account):
         "pct_needs_review",
         "capture_failure_rate",
         "by_item",
+        "by_prompt_version",
     } <= set(body)
+    assert isinstance(body["by_prompt_version"], list)
+
+
+def test_unmapped_brands_shape(client, admin_account):
+    headers = login(client, admin_account["email"], admin_account["password"])
+    resp = client.get("/api/v1/analytics/unmapped-brands", headers=headers)
+    assert resp.status_code == 200
+    assert isinstance(resp.json(), list)
+
+
+def test_unmapped_brands_requires_analyst_role(client, admin_account):
+    resp = client.get("/api/v1/analytics/unmapped-brands")
+    assert resp.status_code == 401
 
 
 def test_top_items_and_brands(client, admin_account):
@@ -55,3 +98,112 @@ def test_rebuild_and_fetch_profiles(client, admin_account):
     resp = client.post("/api/v1/profiles/rebuild?weeks_back=2", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["weeks_back"] == 2
+
+
+def test_unmapped_brands_ranked_by_occurrence(client, admin_account, db):
+    suffix = uuid.uuid4().hex[:8]
+    frequent = f"NewBrand-{suffix}"
+    rare = f"OtherBrand-{suffix}"
+    db.add_all(
+        [
+            UnmappedLabel(
+                raw_label=frequent,
+                bag_type=BagType.polythene,
+                label_kind=UnmappedLabelKind.BRAND,
+                occurrence_count=9,
+            ),
+            UnmappedLabel(
+                raw_label=rare,
+                bag_type=BagType.paper,
+                label_kind=UnmappedLabelKind.BRAND,
+                occurrence_count=1,
+            ),
+            # An ITEM-kind row with a huge count must never leak into this
+            # report — it answers a different question (vocabulary gaps).
+            UnmappedLabel(
+                raw_label=f"item-{suffix}",
+                bag_type=BagType.organic,
+                label_kind=UnmappedLabelKind.ITEM,
+                occurrence_count=99,
+            ),
+        ]
+    )
+    db.commit()
+
+    headers = login(client, admin_account["email"], admin_account["password"])
+    resp = client.get("/api/v1/analytics/unmapped-brands?limit=50", headers=headers)
+    assert resp.status_code == 200
+    labels = [row["raw_label"] for row in resp.json()]
+    assert frequent in labels
+    assert rare in labels
+    assert f"item-{suffix}" not in labels
+    assert labels.index(frequent) < labels.index(rare)
+
+
+class TestQualityByPromptVersion:
+    def test_reflects_reviewed_detections(self, client, admin_account, reviewer_account, db):
+        suffix = uuid.uuid4().hex[:8]
+        resident = Resident(name="QP Test", phone=f"+9476{suffix[:7]}", address="x")
+        db.add(resident)
+        db.flush()
+        bag = Bag(user_id=resident.id, bag_type=BagType.polythene, tag_id=f"QP-{suffix}")
+        session = CollectionSession(user_id=resident.id)
+        db.add_all([bag, session])
+        db.flush()
+        capture = Capture(
+            session_id=session.id,
+            bag_id=bag.id,
+            bag_type=BagType.polythene,
+            image_url="captures/qp-test.jpg",
+            station_id="st-qp",
+            analysis_status=AnalysisStatus.done,
+        )
+        db.add(capture)
+        db.flush()
+
+        run = InferenceRun(
+            capture_id=capture.id,
+            attempt_no=1,
+            provider_name="nvidia",
+            model_name="test-model-qp",
+            prompt_version="v2",
+            status=InferenceRunStatus.SUCCESS,
+        )
+        db.add(run)
+        db.flush()
+
+        detection = Detection(
+            capture_id=capture.id,
+            item_name="chips_packet",
+            confidence=0.9,
+            inference_run_id=run.id,
+            review_status=ReviewStatus.confirmed,
+        )
+        db.add(detection)
+        db.flush()
+
+        db.add(
+            HumanReview(
+                detection_id=detection.id,
+                reviewer_id=uuid.UUID(reviewer_account["id"]),
+                verdict=ReviewVerdict.CONFIRMED,
+            )
+        )
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get("/api/v1/analytics/quality?days=365", headers=headers)
+        assert resp.status_code == 200
+        by_prompt = resp.json()["by_prompt_version"]
+        row = next(
+            (
+                r
+                for r in by_prompt
+                if r["prompt_version"] == "v2" and r["model_name"] == "test-model-qp"
+            ),
+            None,
+        )
+        assert row is not None, by_prompt
+        assert row["reviewed"] >= 1
+        assert row["confirmed"] >= 1
+        assert row["accuracy"] == 1.0

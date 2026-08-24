@@ -278,3 +278,91 @@ upload) — caught immediately on rebuilding the real `api` container for
 Phase 4 verification (`ModuleNotFoundError: No module named 'PIL'`; the
 host dev venv had it because that venv was set up with the `[dev]` extra,
 masking the gap locally). Moved to the main `dependencies` list.
+
+## 24. Prompt versioning: computed from `bag_type`, not threaded through the provider
+Phase 5 needs `InferenceRun.prompt_version` (a Phase 2 column, never
+written to until now) so accuracy is comparable across prompt contract
+versions. The first pass added a `prompt_version` field to
+`ProviderResponse`, set by each provider right where it calls
+`build_analysis_prompt`. That was redundant: `get_prompt_version(bag_type)`
+is a pure function of `bag_type` alone (see `prompts.py`'s
+`_PROMPT_VERSION` table) — every provider builds its prompt from that same
+function, so there's no scenario where a provider's actual version could
+disagree with what `get_prompt_version(capture.bag_type)` would say
+directly. Reverted the `ProviderResponse` field; `services/analysis.py`'s
+`_run_attempt` computes it itself instead. This is also strictly more
+robust: it's known even when the provider call raises before returning
+anything, which a response-carried field couldn't be.
+
+## 25. `UnmappedLabel` grows a `label_kind` discriminator instead of a new table
+Phase 5 needs to track packaging `brand_text` that doesn't fuzzy-match any
+`Brand` — conceptually identical to the existing (if still unwired)
+"unmatched vocabulary label" use of `UnmappedLabel`: a raw string that
+didn't match its target catalog, worth remembering rather than discarding,
+that should surface as a growth candidate for that catalog. Rather than
+add a parallel `UnmappedBrandLabel` table, `UnmappedLabel` gained a
+`label_kind` (`ITEM`/`BRAND`) column, defaulting to `ITEM` so every
+pre-Phase-5 row (and every future unqualified one) keeps today's meaning
+unchanged. The unique constraint widened from `(raw_label, bag_type)` to
+`(raw_label, bag_type, label_kind)` so an item and a brand that happen to
+share text in the same bag_type (plausible — "Sunlight" is both a
+household-brand name and could plausibly be misread as an item fragment)
+never collide into one row.
+
+The discriminator is load-bearing, not informational:
+`POST /vocabulary/from-unmapped/{id}` now rejects (409) any non-ITEM row —
+promoting a BRAND row into `VocabularyItem` would silently corrupt the
+vocabulary with a brand name masquerading as an item type. `GET
+/vocabulary/unmapped` defaults its `label_kind` filter to `ITEM` so its
+existing consumer (the review page's vocabulary inbox, unchanged this
+phase) sees exactly what it always has; BRAND rows surface through the new
+`GET /analytics/unmapped-brands` instead, ranked by `occurrence_count` —
+"the products we don't know about" report the phase asked for.
+
+## 26. Barcode-to-detection pairing is positional, not spatial
+The dedicated barcode decode pass (`services/barcode.py`, pyzbar) runs
+once on the whole tray image and returns decoded values in the order zbar
+reports them. Ideally a decoded barcode would be assigned to whichever
+detected item actually contains it, via bounding-box overlap — but the
+vision model doesn't reliably return `bbox` today (`bbox_x/y/w/h` are
+`None` on every detection produced to date, per Phase 3's own notes), so
+there's no sturdier signal to match on yet.
+
+`services/analysis.py._store_detections` instead claims decoded barcodes
+in listing order: the Nth decoded value goes to the Nth detection that
+would otherwise get a barcode value at all (falling back to whatever the
+model itself read into `barcode_text` once decoded values run out). This
+is a best-effort heuristic, not a claim of correctness for multi-item
+trays with multiple barcodes — it's exactly right for the common
+single-item tray, and degrades to "some items get the wrong other item's
+decoded code" only in the multi-barcode case. `barcode_source` (`"decoded"`
+/ `"ocr"` / `None`) is recorded per detection in `raw_model_output` so this
+is auditable, not silent. Revisit with real bbox-based matching once the
+model (or a future local detector) returns dependable geometry.
+
+## 27. Barcode decode degrades to empty, never raises — a real local-dev gap it protects against
+`pyzbar` needs the `libzbar` shared library at runtime; on this project's
+Windows dev machine, its bundled wheel DLL failed to load
+(`FileNotFoundError: Could not find module 'libiconv.dll'` — a known class
+of pyzbar-on-Windows packaging issue, unrelated to the Docker image, which
+installs `libzbar0` via apt explicitly and was verified working there).
+`services/barcode.py` wraps the import and every decode call in broad
+`except Exception`, so "zbar isn't loadable at all" and "zbar found
+nothing in this image" are deliberately indistinguishable to every
+caller — barcode decode is explicitly a best-effort enhancement (the
+phase's own framing: "attempt a dedicated decode pass"), and a missing
+shared library must never be capable of failing capture analysis.
+
+`tests/test_barcode.py`'s decode-success assertions are gated behind a new
+`requires_zbar` marker (mirroring `requires_db`'s pattern exactly) so they
+skip cleanly on a host where zbar can't load, rather than silently passing
+for the wrong reason (`decode_barcodes` returning `[]` either way) or
+failing the suite over an environment gap unrelated to the code under
+test. Verified for real against the Docker image, where zbar does load.
+
+## 28. `qrcode` added as a dev-only test dependency
+`pyzbar` only ever decodes in this codebase — nothing generates a barcode.
+`tests/test_barcode.py` needs one real decodable image to test the
+decode-success path meaningfully (a plain photo can only ever exercise the
+"nothing found" path). `qrcode` generates that image at test time; it has
+no runtime use and is not imported anywhere outside tests.

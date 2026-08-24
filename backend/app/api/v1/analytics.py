@@ -16,17 +16,22 @@ from app.models import (
     Brand,
     Capture,
     Detection,
+    InferenceRun,
     ReviewStatus,
     StaffAccount,
     StaffRole,
+    UnmappedLabel,
+    UnmappedLabelKind,
     UserWasteProfile,
 )
 from app.schemas.analytics import (
     ItemCount,
     ProfileOut,
     QualityByItem,
+    QualityByPromptVersion,
     QualityReport,
     RebuildResult,
+    UnmappedBrandCount,
 )
 from app.services.aggregation import rebuild_recent
 from app.services.audit import record
@@ -170,6 +175,37 @@ def quality_report(
         .limit(50)
     ).all()
 
+    # Phase 5: accuracy per (prompt_version, model) — lets the new v2
+    # paper/polythene contract be compared against v1 directly. Detections
+    # that predate InferenceRun (inference_run_id NULL) or whose run never
+    # recorded a prompt_version (the pre-Phase-5 gap this closes) fall into
+    # a "None" group rather than being silently dropped.
+    by_prompt_rows = db.execute(
+        select(
+            InferenceRun.prompt_version,
+            InferenceRun.model_name,
+            func.count().label("detections"),
+            func.avg(Detection.confidence).label("avg_confidence"),
+            func.sum(case((Detection.review_status != ReviewStatus.unreviewed, 1), else_=0)).label(
+                "reviewed"
+            ),
+            func.sum(case((Detection.review_status == ReviewStatus.confirmed, 1), else_=0)).label(
+                "confirmed"
+            ),
+            func.sum(case((Detection.review_status == ReviewStatus.corrected, 1), else_=0)).label(
+                "corrected"
+            ),
+            func.sum(case((Detection.review_status == ReviewStatus.rejected, 1), else_=0)).label(
+                "rejected"
+            ),
+        )
+        .join(Capture, Detection.capture_id == Capture.id)
+        .join(InferenceRun, Detection.inference_run_id == InferenceRun.id)
+        .where(Capture.captured_at >= since)
+        .group_by(InferenceRun.prompt_version, InferenceRun.model_name)
+        .order_by(func.count().desc())
+    ).all()
+
     return QualityReport(
         total_detections=totals[0],
         avg_confidence=round(float(totals[1]), 4),
@@ -187,4 +223,49 @@ def quality_report(
             )
             for r in by_item_rows
         ],
+        by_prompt_version=[
+            QualityByPromptVersion(
+                prompt_version=r.prompt_version,
+                model_name=r.model_name,
+                detections=r.detections,
+                avg_confidence=round(float(r.avg_confidence), 4),
+                reviewed=int(r.reviewed),
+                confirmed=int(r.confirmed),
+                corrected=int(r.corrected),
+                rejected=int(r.rejected),
+                accuracy=round(int(r.confirmed) / int(r.reviewed), 4) if r.reviewed else 0.0,
+            )
+            for r in by_prompt_rows
+        ],
     )
+
+
+@router.get("/analytics/unmapped-brands", response_model=list[UnmappedBrandCount])
+def unmapped_brands(
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    account: StaffAccount = Depends(require_roles(*_ANALYTICS_ROLES)),
+) -> list[UnmappedBrandCount]:
+    """The "products we don't know about" report (Phase 5): brand_text read
+    off packaging that never fuzzy-matched an existing Brand, most frequent
+    first. This is how the Brand catalogue is meant to grow — a
+    repeatedly-seen row here is a strong signal to add it via POST /brands."""
+    rows = db.scalars(
+        select(UnmappedLabel)
+        .where(
+            UnmappedLabel.label_kind == UnmappedLabelKind.BRAND,
+            UnmappedLabel.resolved.is_(False),
+        )
+        .order_by(UnmappedLabel.occurrence_count.desc())
+        .limit(limit)
+    ).all()
+    return [
+        UnmappedBrandCount(
+            raw_label=r.raw_label,
+            bag_type=r.bag_type.value,
+            occurrence_count=r.occurrence_count,
+            first_seen_at=r.first_seen_at,
+            last_seen_at=r.last_seen_at,
+        )
+        for r in rows
+    ]

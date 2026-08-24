@@ -25,6 +25,10 @@ dependencies = [
     # runtime dependency, not a dev/test-only one (was misclassified under
     # optional-dependencies.dev before this was ever imported outside tests).
     "pillow>=11.0",
+    # Phase 5: dedicated barcode decode pass (services/barcode.py), independent
+    # of the vision model. Needs the libzbar0 shared library at runtime — see
+    # Dockerfile; Windows wheels bundle it, so local dev needs nothing extra.
+    "pyzbar>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +38,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "pre-commit>=4.0",
+    # Phase 5: generates a real QR image in test_barcode.py — not needed at
+    # runtime, the app only ever decodes, never generates.
+    "qrcode>=8.0",
 ]
 
 [build-system]

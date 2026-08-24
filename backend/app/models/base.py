@@ -158,3 +158,17 @@ class ReviewVerdict(enum.StrEnum):
     CONFIRMED = "CONFIRMED"
     CORRECTED = "CORRECTED"
     REJECTED = "REJECTED"
+
+
+class UnmappedLabelKind(enum.StrEnum):
+    """What kind of unmatched label an UnmappedLabel row represents (Phase
+    5) — the same table now serves two different queues that must never be
+    confused: an ITEM row is a candidate VocabularyItem (the original,
+    Phase-1 use); a BRAND row is packaging brand_text that didn't
+    fuzzy-match any Brand (new in Phase 5, from paper/polythene
+    extraction). Promoting a BRAND row into VocabularyItem would be wrong,
+    so the discriminator is load-bearing, not informational — see
+    api/v1/vocabulary.py's promote_unmapped_label guard."""
+
+    ITEM = "ITEM"
+    BRAND = "BRAND"

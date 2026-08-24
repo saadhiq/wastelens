@@ -23,6 +23,7 @@ from app.models.base import (
     ReviewStatus,
     ReviewVerdict,
     StaffRole,
+    UnmappedLabelKind,
 )
 from app.models.catalog import Brand, UnmappedLabel, VocabularyItem
 from app.models.operations import Bin, BinTransfer, Collector, InspectionStation, PickupRequest
@@ -75,6 +76,7 @@ __all__ = [
     "StaffAccount",
     "StaffRole",
     "UnmappedLabel",
+    "UnmappedLabelKind",
     "UserWasteProfile",
     "VocabularyItem",
 ]

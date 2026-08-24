@@ -33,10 +33,12 @@ from app.models import (
     VocabularyItem,
 )
 from app.services import storage
-from app.services.brand_match import match_brand
+from app.services.barcode import decode_barcodes
+from app.services.brand_match import match_brand, record_unmapped_brand
 from app.services.cost_guard import CostCapExceeded, register_cv_call
 from app.services.vision import VisionProvider, VisionResult, get_vision_provider
 from app.services.vision.base import ProviderResponse
+from app.services.vision.prompts import get_prompt_version
 
 log = get_logger(__name__)
 
@@ -123,6 +125,12 @@ def _run_attempt(
     """
     settings = get_settings()
     started_at = dt.datetime.now(dt.UTC)
+    # A pure function of bag_type (see prompts.py) — computed here directly
+    # rather than threaded through ProviderResponse, since every provider
+    # builds its prompt from the same build_analysis_prompt(bag_type, ...)
+    # and there's no scenario where the two could disagree. This also means
+    # it's known even when the provider call below raises before returning.
+    prompt_version = get_prompt_version(capture.bag_type)
     try:
         response = provider.analyze(
             image_bytes,
@@ -137,6 +145,7 @@ def _run_attempt(
             attempt_no=attempt_no,
             provider_name=settings.vision_provider,
             model_name=_configured_model_name(settings),
+            prompt_version=prompt_version,
             status=_classify_call_failure(exc),
             error_message=str(exc),
             started_at=started_at,
@@ -168,6 +177,7 @@ def _run_attempt(
         provider_name=settings.vision_provider,
         model_name=response.model,
         model_version=response.model_version,
+        prompt_version=prompt_version,
         status=status,
         latency_ms=response.latency_ms,
         input_tokens=response.input_tokens,
@@ -253,7 +263,12 @@ def analyze_capture(
                 return
 
         _store_detections(
-            db, capture, result, raw_model_output=response.raw_text, inference_run_id=run.id
+            db,
+            capture,
+            result,
+            raw_model_output=response.raw_text,
+            inference_run_id=run.id,
+            image_bytes=image_bytes,
         )
         capture.analysis_status = AnalysisStatus.done
         bag = db.get(Bag, capture.bag_id)
@@ -286,10 +301,22 @@ def _store_detections(
     result: VisionResult,
     raw_model_output: str,
     inference_run_id: uuid.UUID,
+    image_bytes: bytes,
 ) -> None:
     threshold = get_settings().confidence_review_threshold
     vocabulary = set(load_vocabulary(db, capture.bag_type))
     raw = {"raw_text": raw_model_output, "tray_notes": result.tray_notes}
+
+    # Barcode: a dedicated decode pass on the whole tray image, independent
+    # of the vision model — see services/barcode.py. Decoded values are
+    # ground truth and beat whatever the model read into barcode_text via
+    # OCR, so they're claimed first, in the order both lists were reported
+    # (roughly left-to-right on the tray for zbar; listing order for the
+    # model). This is a best-effort positional pairing, not a spatial
+    # match — the model doesn't reliably return bbox today, so there's no
+    # sturdier signal to match on yet. See DECISIONS.md.
+    decoded_barcodes = decode_barcodes(image_bytes)
+    decoded_idx = 0
 
     for item in result.detections:
         # Out-of-vocabulary names are kept but demoted to unidentified_item so
@@ -301,6 +328,27 @@ def _store_detections(
                 f" | {subcategory}" if subcategory else ""
             )
 
+        if decoded_idx < len(decoded_barcodes):
+            barcode_text = decoded_barcodes[decoded_idx]
+            barcode_source = "decoded"
+            decoded_idx += 1
+        elif item.barcode_text:
+            barcode_text = item.barcode_text
+            barcode_source = "ocr"
+        else:
+            barcode_text = None
+            barcode_source = None
+
+        # brand_text is the v2-prompt field; ocr_text is the v1 fallback so
+        # organic/general (and any packaging item the model only OCR'd
+        # generically) still get a shot at matching a known brand.
+        brand_source_text = item.brand_text or item.ocr_text
+        matched_brand_id = match_brand(db, brand_source_text)
+        if matched_brand_id is None and item.brand_text:
+            record_unmapped_brand(db, item.brand_text, capture.bag_type)
+
+        item_raw = {**raw, "barcode_source": barcode_source}
+
         db.add(
             Detection(
                 capture_id=capture.id,
@@ -310,10 +358,15 @@ def _store_detections(
                 confidence=item.confidence,
                 estimated_quantity=item.estimated_quantity,
                 ocr_text=item.ocr_text,
-                matched_brand_id=match_brand(db, item.ocr_text),
+                brand_text=item.brand_text,
+                product_name_text=item.product_name_text,
+                pack_size_text=item.pack_size_text,
+                barcode_text=barcode_text,
+                material_type=item.material_type,
+                matched_brand_id=matched_brand_id,
                 bbox=item.bbox,
                 needs_review=item.confidence < threshold,
-                raw_model_output=raw,
+                raw_model_output=item_raw,
                 inference_run_id=inference_run_id,
             )
         )

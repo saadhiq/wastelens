@@ -20,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import BagType, Base
+from app.models.base import BagType, Base, UnmappedLabelKind
 
 
 class VocabularyItem(Base):
@@ -63,24 +63,40 @@ class Brand(Base):
 
 
 class UnmappedLabel(Base):
-    """A raw item_name the vision model produced that didn't match the
-    active vocabulary — the demoted-to-`unidentified_item` case in
-    services/analysis.py. Tracked here (rather than only in
-    Detection.subcategory's free text) so a recurring unmapped label surfaces
-    as a concrete candidate for a new VocabularyItem instead of getting lost.
+    """A raw label the vision model produced that didn't match its target
+    catalog. Two kinds share this table (see UnmappedLabelKind): an ITEM row
+    is an item_name that didn't match the active vocabulary — the
+    demoted-to-`unidentified_item` case in services/analysis.py; a BRAND row
+    (Phase 5) is packaging brand_text that didn't fuzzy-match any Brand
+    above threshold. Tracked here (rather than only in Detection's free
+    text) so a recurring unmapped label surfaces as a concrete candidate for
+    a new VocabularyItem/Brand instead of getting lost.
 
-    Not yet written to by the pipeline — Phase 1 is models only.
+    The ITEM side is still not written to by the pipeline — only the BRAND
+    side is wired up, in Phase 5's brand-matching work.
     """
 
     __tablename__ = "unmapped_labels"
-    # One row per distinct (raw_label, bag_type); occurrence_count increments
-    # on repeats rather than growing a new row per sighting.
-    __table_args__ = (UniqueConstraint("raw_label", "bag_type", name="uq_unmapped_label_bagtype"),)
+    # One row per distinct (raw_label, bag_type, label_kind); occurrence_count
+    # increments on repeats rather than growing a new row per sighting.
+    # label_kind is part of the key (not just bag_type) so an item name and a
+    # brand that happen to share text (e.g. "Sunlight") never collide.
+    __table_args__ = (
+        UniqueConstraint(
+            "raw_label", "bag_type", "label_kind", name="uq_unmapped_label_bagtype_kind"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     raw_label: Mapped[str] = mapped_column(String(200))
     bag_type: Mapped[BagType] = mapped_column(
         Enum(BagType, name="bag_type", create_type=False), index=True
+    )
+    label_kind: Mapped[UnmappedLabelKind] = mapped_column(
+        Enum(UnmappedLabelKind, name="unmapped_label_kind"),
+        default=UnmappedLabelKind.ITEM,
+        server_default=UnmappedLabelKind.ITEM.value,
+        index=True,
     )
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
     first_seen_at: Mapped[dt.datetime] = mapped_column(

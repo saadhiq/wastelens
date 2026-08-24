@@ -6,6 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# libzbar0: shared library pyzbar needs at runtime (Phase 5 barcode decode) —
+# pip alone doesn't provide it, unlike Windows' bundled-DLL wheel.
+RUN apt-get update && apt-get install -y --no-install-recommends libzbar0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml ./
 # Install deps from project metadata (source copied after, for layer caching)
 RUN pip install --no-cache-dir .

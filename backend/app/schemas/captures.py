@@ -123,6 +123,13 @@ class DetectionOut(BaseModel):
     bbox_y: int | None
     bbox_w: int | None
     bbox_h: int | None
+    # Phase 5: packaging extraction — populated only for paper/polythene
+    # detections produced under the v2 prompt (see vision/prompts.py);
+    # organic/general leave these null.
+    product_name_text: str | None
+    pack_size_text: str | None
+    barcode_text: str | None
+    material_type: str | None
 
     model_config = {"from_attributes": True}
 

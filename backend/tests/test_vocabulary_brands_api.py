@@ -6,7 +6,7 @@ import uuid
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app.models import BagType, UnmappedLabel
+from app.models import BagType, UnmappedLabel, UnmappedLabelKind
 from tests.conftest import login, requires_db
 
 pytestmark = requires_db
@@ -114,6 +114,46 @@ class TestPromoteUnmappedLabel:
         resp = client.get("/api/v1/vocabulary/unmapped", headers=headers)
         assert resp.status_code == 200
         assert "items" in resp.json()
+
+    def test_brand_kind_label_cannot_be_promoted(self, client, admin_account, db):
+        label = UnmappedLabel(
+            raw_label=f"BrandX-{uuid.uuid4().hex[:8]}",
+            bag_type=BagType.polythene,
+            label_kind=UnmappedLabelKind.BRAND,
+        )
+        db.add(label)
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.post(f"/api/v1/vocabulary/from-unmapped/{label.id}", headers=headers, json={})
+        assert resp.status_code == 409
+
+    def test_default_listing_excludes_brand_kind(self, client, admin_account, db):
+        item_label = UnmappedLabel(
+            raw_label=f"item-{uuid.uuid4().hex[:8]}", bag_type=BagType.organic
+        )
+        brand_label = UnmappedLabel(
+            raw_label=f"brand-{uuid.uuid4().hex[:8]}",
+            bag_type=BagType.polythene,
+            label_kind=UnmappedLabelKind.BRAND,
+        )
+        db.add_all([item_label, brand_label])
+        db.commit()
+
+        headers = login(client, admin_account["email"], admin_account["password"])
+        resp = client.get("/api/v1/vocabulary/unmapped?limit=200", headers=headers)
+        assert resp.status_code == 200
+        labels = [row["raw_label"] for row in resp.json()["items"]]
+        assert item_label.raw_label in labels
+        assert brand_label.raw_label not in labels
+
+        explicit_brand = client.get(
+            "/api/v1/vocabulary/unmapped?label_kind=BRAND&limit=200", headers=headers
+        )
+        assert explicit_brand.status_code == 200
+        brand_labels = [row["raw_label"] for row in explicit_brand.json()["items"]]
+        assert brand_label.raw_label in brand_labels
+        assert item_label.raw_label not in brand_labels
 
 
 class TestBrandsApi:
