@@ -81,11 +81,23 @@ def presigned_get_url(key: str, expires_in: int = 3600) -> str:
     Signed against s3_public_endpoint_url (falling back to s3_endpoint_url),
     since the endpoint the API container uses to reach MinIO/S3 internally
     may not be reachable from the browser (e.g. the "minio" Docker hostname).
+
+    For real AWS S3 (both settings unset), boto3's own endpoint resolution
+    is NOT used here — generate_presigned_url() defaults to the legacy
+    global "s3.amazonaws.com" host regardless of region_name, and for any
+    region that only accepts SigV4 (which the credential scope is always
+    signed for) that host mismatch makes S3 reject the URL outright
+    (AuthorizationQueryParametersError: region 'X' is wrong; expecting
+    'us-east-1') — caught live against a eu-north-1 bucket. The regional
+    endpoint must be spelled out explicitly to get a working presigned URL.
     """
     settings = get_settings()
+    endpoint = settings.s3_public_endpoint_url or settings.s3_endpoint_url
+    if endpoint is None:
+        endpoint = f"https://s3.{settings.s3_region}.amazonaws.com"
     public_client = boto3.client(
         "s3",
-        endpoint_url=settings.s3_public_endpoint_url or settings.s3_endpoint_url,
+        endpoint_url=endpoint,
         aws_access_key_id=settings.s3_access_key,
         aws_secret_access_key=settings.s3_secret_key,
         region_name=settings.s3_region,

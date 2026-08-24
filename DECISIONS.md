@@ -603,3 +603,20 @@ back to a `Math.random()`-based UUID v4 string otherwise. The fallback
 isn't cryptographically secure, but none of its three call sites need
 that — they're an idempotency key, a React list key, and an IndexedDB
 primary key, not anything security-sensitive.
+
+## 44. Presigned S3 URLs need an explicit regional endpoint
+`storage.py`'s `presigned_get_url()`, with both endpoint settings unset
+(the real-S3 case), let boto3 resolve the endpoint on its own — same as
+every other S3 call in this module. Unlike those calls, it broke: S3
+rejected the resulting URL with `AuthorizationQueryParametersError:
+the region 'eu-north-1' is wrong; expecting 'us-east-1'`, caught live
+against a real bucket. `generate_presigned_url()` defaults to the legacy
+global `s3.amazonaws.com` host regardless of `region_name`, while the
+signature it produces is still scoped to the real region — a mismatch
+any region requiring SigV4-only auth (most non-`us-east-1` regions,
+including `eu-north-1`) rejects outright. The fix is narrow: when both
+endpoint settings are unset, this one function now builds
+`https://s3.{region}.amazonaws.com` explicitly rather than leaving it to
+boto3. Every other call in this module (`head_bucket`, `put_object`,
+`get_object`) resolves correctly on its own and is untouched — this is
+a `generate_presigned_url()`-specific quirk, not a general one.
