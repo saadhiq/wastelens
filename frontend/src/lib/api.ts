@@ -7,6 +7,20 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api
 
 const TOKEN_KEY = "wastelens_access_token";
 
+// crypto.randomUUID() only exists in secure contexts (HTTPS or localhost) —
+// plain-HTTP deployments (e.g. an EC2 box without a domain/TLS yet) need a
+// fallback or every call using it throws before the request is even sent.
+export function generateUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -351,7 +365,7 @@ export function uploadCapture(
   return apiFetch<Capture>("/captures", {
     method: "POST",
     body: form,
-    headers: { "Idempotency-Key": crypto.randomUUID() },
+    headers: { "Idempotency-Key": generateUUID() },
   });
 }
 

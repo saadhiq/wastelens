@@ -590,3 +590,16 @@ without updating `Capture.image_purged_at`, silently desyncing the
 database from what's actually in the bucket — the existing
 `purge_old_images` job (#39) is the only deletion path and should stay
 that way.
+
+## 43. `crypto.randomUUID()` has a fallback — it's unavailable over plain HTTP
+`crypto.randomUUID()` only exists in a browser "secure context" (HTTPS or
+`localhost`); a plain-HTTP deployment on an IP address (the EC2 pilot,
+before Stage 11's domain+TLS hardening) makes it `undefined`, and every
+caller threw before its request was ever sent — caught live: capture
+upload, collector draft-bag keys, and the offline queue's local IDs all
+silently failed with no network trace at all. `lib/api.ts` now exports
+`generateUUID()`, which uses `crypto.randomUUID()` when present and falls
+back to a `Math.random()`-based UUID v4 string otherwise. The fallback
+isn't cryptographically secure, but none of its three call sites need
+that — they're an idempotency key, a React list key, and an IndexedDB
+primary key, not anything security-sensitive.

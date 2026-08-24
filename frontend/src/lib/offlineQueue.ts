@@ -10,7 +10,7 @@
  * wrapper library.
  */
 
-import { createSession, type SessionCreateBody, type SessionDetail } from "./api";
+import { createSession, generateUUID, type SessionCreateBody, type SessionDetail } from "./api";
 
 const DB_NAME = "wastelens-offline";
 const DB_VERSION = 1;
@@ -43,7 +43,7 @@ export async function queueSession(
   residentLabel: string,
 ): Promise<QueuedSession> {
   const entry: QueuedSession = {
-    localId: crypto.randomUUID(),
+    localId: generateUUID(),
     body,
     residentLabel,
     queuedAt: new Date().toISOString(),

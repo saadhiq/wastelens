@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ApiError,
   createSession,
+  generateUUID,
   lookupResidentByPhone,
   lookupResidentByQr,
   type Resident,
@@ -29,7 +30,7 @@ const CONDITIONS = ["GOOD", "WET", "TORN", "OVERFILLED"] as const;
 type DraftBag = SessionBagInput & { key: string };
 
 function newDraftBag(bagType: string): DraftBag {
-  return { key: crypto.randomUUID(), bag_type: bagType, tag_id: "", gross_weight_kg: "" };
+  return { key: generateUUID(), bag_type: bagType, tag_id: "", gross_weight_kg: "" };
 }
 
 export default function Collector() {
