@@ -25,8 +25,12 @@ class Settings(BaseSettings):
     # (MinIO locally/in Docker) — leave it unset (None) to talk to real AWS
     # S3, which boto3 resolves to the correct regional endpoint on its own
     # from s3_region. Setting it always overrides that resolution, so it
-    # must be None/absent, not just falsy-ish, for real S3.
-    s3_endpoint_url: str | None = "http://localhost:9000"
+    # must be None/absent, not just falsy-ish, for real S3. Defaults to
+    # None here (not the MinIO endpoint) — local/Docker dev gets MinIO from
+    # .env.example's explicit S3_ENDPOINT_URL=http://minio:9000, so this
+    # default is only ever what a real-S3 deployment sees when the line is
+    # simply absent from .env.
+    s3_endpoint_url: str | None = None
     # Host used when signing URLs handed to the browser (Phase 3 review page).
     # In Docker, s3_endpoint_url is the container-network hostname ("minio"),
     # which a browser on the host can't resolve — this is the address it can
